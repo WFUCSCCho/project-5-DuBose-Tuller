@@ -2,6 +2,7 @@
 #include <vector>
 #include <cuda.h>
 #include <vector_types.h>
+#include <curand_kernel.h>
 
 using namespace std;
 #define T 32
@@ -63,35 +64,21 @@ __global__ void generateRandomNumbers(curandState_t* states, float* numbers, int
     }
 }
 
-// TODO get this to multiply A^T * B and support non-squares
-__global__ void multiplyMatrices(float *A, float *B, float *C, int n) {
-    int i = blockIdx.y * blockDim.y + threadIdx.y; // row index
-    int j = blockIdx.x * blockDim.x + threadIdx.x; // col index
-
-    if (i < n && j < n) {
-        float c_ij = 0;
-
-        for (int k=0; k<n; ++k) {
-            c_ij += A[i*n + k] * B[k*n + j];
-        }
-
-        C[i*n + j] = c_ij;
-    }
-}
-
 /* ------------------------------------------------------------------
  * Case (m=2, n=1): contract mode 2 (size J), batch over mode 1 (I)
  * Y: K x I   ->  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]
  * U layout: J x I  (column i holds the vector for batch element i)
  * ------------------------------------------------------------------ */
-__global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int *I, int *J, int *K) {
-    int i = threadIdx.i
-    if (i < I) {
-        // X_slice = Get ith horizontal slice
-        // U_col = Get ith col of U
-        // Call multiplyMatrices(X_slice, U_col, Y)
-        // set Y accordingly if necesaary
+__global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
+    int k = threadIdx.x + blockIdx.x * blockDim.x;
+    int i = threadIdx.y + blockIdx.y * blockDim.y;
+    if (k < K && i < I) {
+        float sum = 0;
+        for (int j = 0; j < J; ++j) {
+            sum += X[i + j*I + k*I*J] * U[j + i*J];
+        }
 
+        Y[k + i*K] = sum;
     }
     
 }
@@ -105,14 +92,14 @@ int main(int argc, char **argv) {
     
     int I = strtol(argv[1], NULL, 10);
     int J = strtol(argv[2], NULL, 10);
-    int J = strtol(argv[3], NULL, 10);
-    printf("Performing random bttv with n = %d\n", n);
+    int K = strtol(argv[3], NULL, 10);
+    printf("Performing random bttv with I=%d J=%d K=%d\n", I, J, K);
 
     // Initialize arrays
     float *X = (float*)malloc(I*J*K*sizeof(float));
     float *U = (float*)malloc(J*I*sizeof(float));
     float *Y = (float*)malloc(K*I*sizeof(float));
-    if (A == NULL || B == NULL || C == NULL) {
+    if (X == NULL || U == NULL || Y == NULL) {
         printf("malloc failed\n");
         exit(3);
     }
@@ -120,12 +107,13 @@ int main(int argc, char **argv) {
     float *dev_X, *dev_U, *dev_Y;
     curandState_t *dev_states;
 
-    CHECK_CUDA(cudaMalloc(&dev_A, I*J*K*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_B, J*I*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_C, K*I*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_states, n * n * sizeof(curandState_t)));
+    CHECK_CUDA(cudaMalloc(&dev_X, I*J*K*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_U, J*I*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_Y, K*I*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
 
-    dim3 dimGrid((I / T) + 1, (J / T) + 1, (K / T) + 1);
+    dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
+    dim3 dimGrid((K / T) + 1, (I / T) + 1);
     dim3 dimBlock(T,T);
     
     cudaEvent_t start, stop;
@@ -134,12 +122,11 @@ int main(int argc, char **argv) {
 
     // Fill input matrices with random values ON KERNEL
     // This is also considered the kernel's 'warm-up' for timing
-    setup_kernel<<<dimGrid, dimBlock>>>(dev_states, time(NULL), I, J, K);
-    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_X, I, J, K);
-    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_U, J, I, 1);
+    setup_kernel<<<dimGrid3, dimBlock>>>(dev_states, time(NULL), I, J, K);
+    generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_X, I, J, K);
+    generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_U, J, I, 1);
 
     CHECK_CUDA(cudaEventRecord(start)); // This happens on the GPU!
-    CHECK_CUDA(cudaMemcpy(dev_Y, Y, K*I*sizeof(float), cudaMemcpyHostToDevice));
 
     bttv_m_2_n_1<<<dimGrid, dimBlock>>>(dev_X, dev_U, dev_Y, I, J, K);
 
@@ -160,15 +147,15 @@ int main(int argc, char **argv) {
     writeMatrix(product, Y, K, I);
 
     FILE *result = fopen("results.csv", "a");
-    fprintf(csv, "Naive,m2n1,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(result, "Naive,m2n1,%d,%d,%d,%.6f\n", I, J, K, milliseconds / 1000.0f);
 
     // Free
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-    cudaFree(dev_A);
-    cudaFree(dev_B);
-    cudaFree(dev_C);
-    free(A);
-    free(B);
-    free(C);
+    cudaFree(dev_X);
+    cudaFree(dev_U);
+    cudaFree(dev_Y);
+    free(X);
+    free(U);
+    free(Y);
 }
