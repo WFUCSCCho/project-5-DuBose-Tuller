@@ -6,4 +6,4 @@ $(TARGET): batched_ttv.c
 	$(CC) $(CFLAGS) -o $(TARGET) batched_ttv.c
 
 clean:
-	rm -f $(TARGET) results.csv
+	rm -f $(TARGET)
