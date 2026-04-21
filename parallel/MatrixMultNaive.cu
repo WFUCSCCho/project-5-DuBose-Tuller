@@ -2,9 +2,15 @@
 #include <vector>
 #include <cuda.h>
 #include <vector_types.h>
+#include <curand.h>
+#include <curand_kernel.h>
+
+// Max threads for each dimension of a 2D block
+#ifndef T
+#define T 32
+#endif
 
 using namespace std;
-#define T 32
 
 // Helper macro for error checking
 #define CHECK_CUDA(call) { \
@@ -15,8 +21,8 @@ using namespace std;
     } \
 }
 
-void printMatrix(float *A, int m, int n) {
-    for (int i=0; i<m; ++i) {
+void printMatrix(float *A, int n) {
+    for (int i=0; i<n; ++i) {
         for (int j=0; j<n; ++j) {
             printf("%f\t", A[i*n + j]);
         }
@@ -24,12 +30,12 @@ void printMatrix(float *A, int m, int n) {
     }
 }
 
-void writeMatrix(FILE *f, float *A, int m, int n) {
+void writeMatrix(FILE *f, float *A, int n) {
     if (f == NULL) {
         printf("Error opening file");
         exit(4);
     }
-    for (int i=0; i<m; ++i) {
+    for (int i=0; i<n; ++i) {
         for (int j=0; j<n; ++j) {
             fprintf(f, "%f\t", A[i*n + j]);
         }
@@ -38,23 +44,21 @@ void writeMatrix(FILE *f, float *A, int m, int n) {
 }
 
 // Separating init makes the generation kernel much faster
-__global__ void setup_kernel(curandState_t* states, unsigned long seed, int I, int J, int K) {
+__global__ void setup_kernel(curandState_t* states, unsigned long seed, int n) {
     int col = threadIdx.x + blockIdx.x * blockDim.x;
     int row = threadIdx.y + blockIdx.y * blockDim.y;
-    int slc = threadIdx.z + blockIdx.z * blockDim.z;
-    if (row < I && col < J && slc < K) {
-        int idx = row + col * I + slc * I * J;
+    if (row < n && col < n) {
+        int idx = row * n + col;
         curand_init(seed, idx, 0, &states[idx]);
     }
 }
 
-__global__ void generateRandomNumbers(curandState_t* states, float* numbers, int I, int J, int K) {
+__global__ void generateRandomNumbers(curandState_t* states, float* numbers, int n) {
     int col = threadIdx.x + blockIdx.x * blockDim.x;
     int row = threadIdx.y + blockIdx.y * blockDim.y;
-    int slc = threadIdx.z + blockIdx.z * blockDim.z;
 
-    if (row < I && col < J && slc < K) {
-        int idx = row + col * I + slc * I * J;
+    if (row < n && col < n) {
+        int idx = row * n + col;
         // Use a local copy of the state for efficiency
         curandState_t localState = states[idx];
         numbers[idx] = curand_uniform(&localState);
@@ -63,7 +67,6 @@ __global__ void generateRandomNumbers(curandState_t* states, float* numbers, int
     }
 }
 
-// TODO get this to multiply A^T * B and support non-squares
 __global__ void multiplyMatrices(float *A, float *B, float *C, int n) {
     int i = blockIdx.y * blockDim.y + threadIdx.y; // row index
     int j = blockIdx.x * blockDim.x + threadIdx.x; // col index
@@ -79,53 +82,35 @@ __global__ void multiplyMatrices(float *A, float *B, float *C, int n) {
     }
 }
 
-/* ------------------------------------------------------------------
- * Case (m=2, n=1): contract mode 2 (size J), batch over mode 1 (I)
- * Y: K x I   ->  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]
- * U layout: J x I  (column i holds the vector for batch element i)
- * ------------------------------------------------------------------ */
-__global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int *I, int *J, int *K) {
-    int i = threadIdx.i
-    if (i < I) {
-        // X_slice = Get ith horizontal slice
-        // U_col = Get ith col of U
-        // Call multiplyMatrices(X_slice, U_col, Y)
-        // set Y accordingly if necesaary
-
-    }
-    
-}
-
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        cerr << "Usage" << argv[0] << " <I>, <J>, <K>" << endl;
+    if (argc != 2) {
+        cerr << "Usage" << argv[0] << " <n>" << endl;
         exit(2);
     }
     
-    int I = strtol(argv[1], NULL, 10);
-    int J = strtol(argv[2], NULL, 10);
-    int J = strtol(argv[3], NULL, 10);
-    printf("Performing random bttv with n = %d\n", n);
+    int n = strtol(argv[1], NULL, 10);
+    printf("Performing random matmul with n = %d\n", n);
 
-    // Initialize arrays
-    float *X = (float*)malloc(I*J*K*sizeof(float));
-    float *U = (float*)malloc(J*I*sizeof(float));
-    float *Y = (float*)malloc(K*I*sizeof(float));
+    // Initialize matrices
+    int matrixSize = n*n*sizeof(float);
+    float *A = (float*)malloc(matrixSize);
+    float *B = (float*)malloc(matrixSize);
+    float *C = (float*)malloc(matrixSize);
     if (A == NULL || B == NULL || C == NULL) {
         printf("malloc failed\n");
         exit(3);
     }
 
-    float *dev_X, *dev_U, *dev_Y;
+    float *dev_A, *dev_B, *dev_C;
     curandState_t *dev_states;
 
-    CHECK_CUDA(cudaMalloc(&dev_A, I*J*K*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_B, J*I*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_C, K*I*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_A, matrixSize));
+    CHECK_CUDA(cudaMalloc(&dev_B, matrixSize));
+    CHECK_CUDA(cudaMalloc(&dev_C, matrixSize));
     CHECK_CUDA(cudaMalloc(&dev_states, n * n * sizeof(curandState_t)));
 
-    dim3 dimGrid((I / T) + 1, (J / T) + 1, (K / T) + 1);
+    dim3 dimGrid((n / T) + 1, (n / T) + 1, 1);
     dim3 dimBlock(T,T);
     
     cudaEvent_t start, stop;
@@ -134,17 +119,17 @@ int main(int argc, char **argv) {
 
     // Fill input matrices with random values ON KERNEL
     // This is also considered the kernel's 'warm-up' for timing
-    setup_kernel<<<dimGrid, dimBlock>>>(dev_states, time(NULL), I, J, K);
-    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_X, I, J, K);
-    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_U, J, I, 1);
+    setup_kernel<<<dimGrid, dimBlock>>>(dev_states, time(NULL), n);
+    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_A, n);
+    generateRandomNumbers<<<dimGrid, dimBlock>>>(dev_states, dev_B, n);
 
     CHECK_CUDA(cudaEventRecord(start)); // This happens on the GPU!
-    CHECK_CUDA(cudaMemcpy(dev_Y, Y, K*I*sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(dev_C, C, matrixSize, cudaMemcpyHostToDevice));
 
-    bttv_m_2_n_1<<<dimGrid, dimBlock>>>(dev_X, dev_U, dev_Y, I, J, K);
+    multiplyMatrices<<<dimGrid, dimBlock>>>(dev_A, dev_B, dev_C, n);
 
     CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUDA(cudaMemcpy(Y, dev_Y, K*I*sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(C, dev_C, matrixSize, cudaMemcpyDeviceToHost));
 
     // Record the time for the *last* thread's cudaEventRecord(stop)
     CHECK_CUDA(cudaEventRecord(stop));
@@ -157,10 +142,10 @@ int main(int argc, char **argv) {
 
     // Write results to files
     FILE *product = fopen("product.dat", "w");
-    writeMatrix(product, Y, K, I);
+    writeMatrix(product, C, n);
 
     FILE *result = fopen("results.csv", "a");
-    fprintf(csv, "Naive,m2n1,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(result, "Naive,%d,%d,%f\n", n, T, milliseconds);
 
     // Free
     cudaEventDestroy(start);
