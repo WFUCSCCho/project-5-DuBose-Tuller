@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaMalloc(&dev_Y, K*I*sizeof(float)));
     CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
 
-    dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
+    dim3 dimGrid3((J / T) + 1, (I / T) + 1, K); // For X init
     dim3 dimGrid((K / T) + 1, (I / T) + 1);
     dim3 dimBlock(T,T);
     
