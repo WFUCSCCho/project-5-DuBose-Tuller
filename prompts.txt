@@ -1,0 +1,35 @@
+ @README.md This is a project description for my GPU programming class. I am personally interested in parallelizing the code for computing a        
+  batched matrix vector product @../../../Documents/MATLAB/tensors/cp-newton/matlab/batched_ttv.c for my research. I think the 'serial' version      
+  should just use more naive mat vec / dot products instead of casting to BLAS calls for simplicity of the project. We also need to remove the MEX   
+  interface and just have it be a C program in the style of @../project-2-part-1-DuBose-Tuller/MatrixMult.c so that it can be more easily cast to    
+  CUDA. Does this idea fit the requirements of the project in your opinion?
+
+
+Yes, this fits the requirements well. Here's my assessment:           
+                               
+  Strengths of this approach:
+                                                                                                                                           
+  - Problem fit: Batched tensor-times-vector (TTV) is mathematically simple (just batched mat-vec / dot products), fully controllable by tensor
+  dimensions I, J, K, and will show clear GPU speedup — exactly what's asked for.
+  - Serial simplification is correct: Replacing BLAS calls with naive triple loops (like the multiplyMatrices style in MatrixMult.c) makes the serial
+   version pedagogically transparent and a fair baseline.
+  - MEX removal is natural: The MEX interface is just a MATLAB wrapper. Stripping it down to a standalone main() with command-line dimension
+  arguments (like ./batched_ttv I J K) is a clean transformation.
+  - Scientific motivation is real: You have a genuine research use case (CP decomposition / tensor methods), which satisfies the "Why" slide in the
+  presentation.
+
+  Things to plan for to satisfy all requirements:
+
+  - Performance optimization beyond naive: The naive CUDA port would be one kernel per batch element. For the optimization, shared memory tiling of
+  the inner mat-vec loop is the natural choice — or using coalesced memory access since the current batched_ttv.c has different memory strides per
+  case (m, n combination), which gives you something interesting to discuss.
+  - Benchmark across problem sizes: Sweep over tensor dimensions (e.g., vary I from 64 to 4096) to generate your performance graph.
+  - Pick a subset of the (m, n) cases: The current code handles 6 cases. For the project, you could focus on one or two (e.g., m=1, n=3 and m=2, n=3)
+   to keep scope manageable.
+
+  One potential risk: The 6 different memory-layout cases in batched_ttv.c each require a different CUDA kernel or branching logic. I'd recommend
+  scoping to 1-2 cases for the project and noting the others as future work.
+
+  Overall: solid choice.
+
+Can you perform the MEX to plain C port please? Let's start with all six cases and then later I will focus on parallelizing them one at a time
