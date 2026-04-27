@@ -32,12 +32,17 @@ static void load_data(const char *path, int *I, int *J, int *K,
     fread(I, sizeof(int), 1, f);
     fread(J, sizeof(int), 1, f);
     fread(K, sizeof(int), 1, f);
-    long IJK = (long)(*I) * (*J) * (*K);
-    *X = (float *)malloc(IJK * sizeof(float));
-    *U = (float *)malloc(IJK * sizeof(float));
+    long IJK  = (long)(*I) * (*J) * (*K);
+    long IJ   = (long)(*I) * (*J);
+    long IK   = (long)(*I) * (*K);
+    long JK   = (long)(*J) * (*K);
+    long Ulen = IJ > IK ? IJ : IK;
+    if (JK > Ulen) Ulen = JK;
+    *X = (float *)malloc(IJK  * sizeof(float));
+    *U = (float *)malloc(Ulen * sizeof(float));
     if (!*X || !*U) { fprintf(stderr, "malloc failed\n"); exit(2); }
-    fread(*X, sizeof(float), IJK, f);
-    fread(*U, sizeof(float), IJK, f);
+    fread(*X, sizeof(float), IJK,  f);
+    fread(*U, sizeof(float), Ulen, f);
     fclose(f);
 }
 
