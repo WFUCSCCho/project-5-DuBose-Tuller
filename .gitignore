@@ -5,3 +5,4 @@ generate/generate
 **/*.dat
 **/*.bin
 data/
+logs/
