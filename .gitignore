@@ -1,3 +1,7 @@
 parallel/batched_ttv
+parallel/batched_ttv_omp
 serial/batched_ttv
+generate/generate
 **/*.dat
+**/*.bin
+data/

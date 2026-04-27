@@ -1,8 +1,5 @@
 #include <iostream>
-#include <vector>
 #include <cuda.h>
-#include <vector_types.h>
-#include <curand_kernel.h>
 
 using namespace std;
 #define T 32
@@ -14,6 +11,23 @@ using namespace std;
         printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
         exit(1); \
     } \
+}
+
+static void load_data(const char *path, int *I, int *J, int *K,
+                      float **X, float **U)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) { fprintf(stderr, "Cannot open %s\n", path); exit(1); }
+    fread(I, sizeof(int), 1, f);
+    fread(J, sizeof(int), 1, f);
+    fread(K, sizeof(int), 1, f);
+    long IJK = (long)(*I) * (*J) * (*K);
+    *X = (float *)malloc(IJK * sizeof(float));
+    *U = (float *)malloc(IJK * sizeof(float));
+    if (*X == NULL || *U == NULL) { fprintf(stderr, "malloc failed\n"); exit(2); }
+    fread(*X, sizeof(float), IJK, f);
+    fread(*U, sizeof(float), IJK, f);
+    fclose(f);
 }
 
 void printMatrix(float *A, int m, int n) {
@@ -38,39 +52,13 @@ void writeMatrix(FILE *f, float *A, int m, int n) {
     }
 }
 
-// Separating init makes the generation kernel much faster
-__global__ void setup_kernel(curandState_t* states, unsigned long seed, int I, int J, int K) {
-    int col = threadIdx.x + blockIdx.x * blockDim.x;
-    int row = threadIdx.y + blockIdx.y * blockDim.y;
-    int slc = threadIdx.z + blockIdx.z * blockDim.z;
-    if (row < I && col < J && slc < K) {
-        int idx = row + col * I + slc * I * J;
-        curand_init(seed, idx, 0, &states[idx]);
-    }
-}
-
-__global__ void generateRandomNumbers(curandState_t* states, float* numbers, int I, int J, int K) {
-    int col = threadIdx.x + blockIdx.x * blockDim.x;
-    int row = threadIdx.y + blockIdx.y * blockDim.y;
-    int slc = threadIdx.z + blockIdx.z * blockDim.z;
-
-    if (row < I && col < J && slc < K) {
-        int idx = row + col * I + slc * I * J;
-        // Use a local copy of the state for efficiency
-        curandState_t localState = states[idx];
-        numbers[idx] = curand_uniform(&localState);
-        // Save the state back if you plan to call this kernel again
-        states[idx] = localState;
-    }
-}
-
 /* ------------------------------------------------------------------
  * Case (m=2, n=1): contract mode 2 (size J), batch over mode 1 (I)
  * Y: K x I   ->  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]
  * U layout: J x I  (column i holds the vector for batch element i)
  * ------------------------------------------------------------------ */
 __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
-    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1
+    // threadIdx.x -> i: consecutive threads read X[i + j*I + k*I*J] with stride 1
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int k = threadIdx.y + blockIdx.y * blockDim.y;
     if (i < I && k < K) {
@@ -84,34 +72,34 @@ __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) 
 
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        cerr << "Usage" << argv[0] << " <I>, <J>, <K>" << endl;
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " <data_file>" << endl;
         exit(2);
     }
-    
-    int I = strtol(argv[1], NULL, 10);
-    int J = strtol(argv[2], NULL, 10);
-    int K = strtol(argv[3], NULL, 10);
-    printf("Performing random bttv with I=%d J=%d K=%d\n", I, J, K);
+
+    // Load data from binary file
+    int I, J, K;
+    float *X, *U;
+    load_data(argv[1], &I, &J, &K, &X, &U);
+    printf("Performing bttv with I=%d J=%d K=%d\n", I, J, K);
 
     // Initialize arrays
-    float *X = (float*)malloc(I*J*K*sizeof(float));
-    float *U = (float*)malloc(J*I*sizeof(float));
-    float *Y = (float*)malloc(K*I*sizeof(float));
-    if (X == NULL || U == NULL || Y == NULL) {
+    float *Y = (float*)malloc((long)K*I*sizeof(float));
+    if (Y == NULL) {
         printf("malloc failed\n");
         exit(3);
     }
 
     float *dev_X, *dev_U, *dev_Y;
-    curandState_t *dev_states;
 
-    CHECK_CUDA(cudaMalloc(&dev_X, I*J*K*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_U, J*I*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_Y, K*I*sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
+    CHECK_CUDA(cudaMalloc(&dev_X, (long)I*J*K*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_U, (long)J*I*sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&dev_Y, (long)K*I*sizeof(float)));
 
-    dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
+    // Copy input data to device
+    CHECK_CUDA(cudaMemcpy(dev_X, X, (long)I*J*K*sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(dev_U, U, (long)J*I*sizeof(float), cudaMemcpyHostToDevice));
+
     dim3 dimGrid((I / T) + 1, (K / T) + 1);
     dim3 dimBlock(T,T);
     
@@ -136,7 +124,7 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));
 
-    // Record the (matmul) kernel time
+    // Record the kernel time
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
     printf("Kernel execution time: %f ms\n", milliseconds);
@@ -144,9 +132,11 @@ int main(int argc, char **argv) {
     // Write results to files
     FILE *product = fopen("product.dat", "w");
     writeMatrix(product, Y, K, I);
+    fclose(product);
 
     FILE *result = fopen("results.csv", "a");
-    fprintf(result, "Naive,m2n1,%d,%d,%d,%.6f\n", I, J, K, milliseconds / 1000.0f);
+    fprintf(result, "GPU,m2n1,%d,%d,%d,%.6f\n", I, J, K, milliseconds / 1000.0f);
+    fclose(result);
 
     // Free
     cudaEventDestroy(start);

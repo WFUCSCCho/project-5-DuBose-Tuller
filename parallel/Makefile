@@ -1,8 +1,14 @@
-CC      = nvcc
-TARGET  = batched_ttv
+NVCC    = nvcc
+CC      = gcc
+CFLAGS  = -fopenmp -Wall
 
-$(TARGET): batched_ttv.cu
-	$(CC) -o $(TARGET) batched_ttv.cu
+all: batched_ttv batched_ttv_omp
+
+batched_ttv: batched_ttv.cu
+	$(NVCC) -o batched_ttv batched_ttv.cu
+
+batched_ttv_omp: batched_ttv_omp.c
+	$(CC) $(CFLAGS) -o batched_ttv_omp batched_ttv_omp.c
 
 clean:
-	rm -f $(TARGET)
+	rm -f batched_ttv batched_ttv_omp

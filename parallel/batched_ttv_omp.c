@@ -1,36 +1,24 @@
 /*
- * batched_ttv.c  --  Serial (single-threaded) batched tensor-times-vector
+ * batched_ttv_omp.c  --  OpenMP batched tensor-times-vector (all six cases)
  *
- * Derived from: ~/Documents/MATLAB/tensors/cp-newton/matlab/batched_ttv.c
- * Original used the MATLAB MEX interface and BLAS (dgemv/ddot).
- * This version removes both dependencies and replaces them with plain
- * nested loops.
- *
- * Problem: given a 3rd-order tensor X of size I x J x K (stored in
- * column-major order, i.e. X[i + j*I + k*I*J]) and a batch of vectors
- * packed into U, compute the mode-m tensor-times-vector product,
- * batched over mode n, for all six (m, n) pairings.
+ * For each case the two outermost loops are independent (they index output
+ * elements) and are collapsed into a single parallel work-sharing loop.
+ * The innermost loop is a scalar reduction with a thread-local accumulator,
+ * so no atomic operations are needed.
  *
  * X and U are read from a binary file produced by ../generate/generate.
  *
- * Usage:  ./batched_ttv <data_file>
+ * Usage:  OMP_NUM_THREADS=<N> ./batched_ttv_omp <data_file>
  *
- * Output dimensions for each case:
- *   (m=1,n=3) -> Y: J x K
- *   (m=1,n=2) -> Y: K x J
- *   (m=2,n=3) -> Y: I x K
- *   (m=3,n=2) -> Y: I x J
- *   (m=2,n=1) -> Y: K x I
- *   (m=3,n=1) -> Y: J x I
- *
- * Timing for each case is appended to results.csv.
+ * Appends one CSV line per case to results.csv:
+ *   OpenMP-<N>,<case>,<I>,<J>,<K>,<seconds>
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <omp.h>
 
-/* Return elapsed wall-clock seconds between two timespec values. */
 static double elapsed_sec(struct timespec t0, struct timespec t1)
 {
     return (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
@@ -54,13 +42,12 @@ static void load_data(const char *path, int *I, int *J, int *K,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=1, n=3): contract mode 1 (size I), batch over mode 3 (K)
- * Y: J x K   ->  Y[j + k*J] = sum_i  X[i + j*I + k*I*J] * U[i + k*I]
- * U layout: I x K
+ * (m=1, n=3): Y[j + k*J] = sum_i  X[i + j*I + k*I*J] * U[i + k*I]
  * ------------------------------------------------------------------ */
 static void ttv_m1_n3(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int k = 0; k < K; k++)
         for (int j = 0; j < J; j++) {
             float s = 0.0f;
@@ -71,13 +58,12 @@ static void ttv_m1_n3(const float *X, const float *U, float *Y,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=1, n=2): contract mode 1 (size I), batch over mode 2 (J)
- * Y: K x J   ->  Y[k + j*K] = sum_i  X[i + j*I + k*I*J] * U[i + j*I]
- * U layout: I x J
+ * (m=1, n=2): Y[k + j*K] = sum_i  X[i + j*I + k*I*J] * U[i + j*I]
  * ------------------------------------------------------------------ */
 static void ttv_m1_n2(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int j = 0; j < J; j++)
         for (int k = 0; k < K; k++) {
             float s = 0.0f;
@@ -88,13 +74,12 @@ static void ttv_m1_n2(const float *X, const float *U, float *Y,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=2, n=3): contract mode 2 (size J), batch over mode 3 (K)
- * Y: I x K   ->  Y[i + k*I] = sum_j  X[i + j*I + k*I*J] * U[j + k*J]
- * U layout: J x K
+ * (m=2, n=3): Y[i + k*I] = sum_j  X[i + j*I + k*I*J] * U[j + k*J]
  * ------------------------------------------------------------------ */
 static void ttv_m2_n3(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int k = 0; k < K; k++)
         for (int i = 0; i < I; i++) {
             float s = 0.0f;
@@ -105,13 +90,12 @@ static void ttv_m2_n3(const float *X, const float *U, float *Y,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=3, n=2): contract mode 3 (size K), batch over mode 2 (J)
- * Y: I x J   ->  Y[i + j*I] = sum_k  X[i + j*I + k*I*J] * U[k + j*K]
- * U layout: K x J
+ * (m=3, n=2): Y[i + j*I] = sum_k  X[i + j*I + k*I*J] * U[k + j*K]
  * ------------------------------------------------------------------ */
 static void ttv_m3_n2(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int j = 0; j < J; j++)
         for (int i = 0; i < I; i++) {
             float s = 0.0f;
@@ -122,13 +106,12 @@ static void ttv_m3_n2(const float *X, const float *U, float *Y,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=2, n=1): contract mode 2 (size J), batch over mode 1 (I)
- * Y: K x I   ->  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]
- * U layout: J x I
+ * (m=2, n=1): Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]
  * ------------------------------------------------------------------ */
 static void ttv_m2_n1(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < I; i++)
         for (int k = 0; k < K; k++) {
             float s = 0.0f;
@@ -139,13 +122,12 @@ static void ttv_m2_n1(const float *X, const float *U, float *Y,
 }
 
 /* ------------------------------------------------------------------
- * Case (m=3, n=1): contract mode 3 (size K), batch over mode 1 (I)
- * Y: J x I   ->  Y[j + i*J] = sum_k  X[i + j*I + k*I*J] * U[k + i*K]
- * U layout: K x I
+ * (m=3, n=1): Y[j + i*J] = sum_k  X[i + j*I + k*I*J] * U[k + i*K]
  * ------------------------------------------------------------------ */
 static void ttv_m3_n1(const float *X, const float *U, float *Y,
                       int I, int J, int K)
 {
+    #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < I; i++)
         for (int j = 0; j < J; j++) {
             float s = 0.0f;
@@ -167,14 +149,20 @@ int main(int argc, char *argv[])
     int I, J, K;
     float *X, *U;
     load_data(argv[1], &I, &J, &K, &X, &U);
-    printf("Batched TTV (Serial)  I=%d  J=%d  K=%d\n", I, J, K);
 
-    /* Y: I*J*K floats is a safe upper bound for all six output layouts. */
-    float *Y = (float *)malloc((long)I * J * K * sizeof(float));
+    int nthreads;
+    #pragma omp parallel
+    { nthreads = omp_get_num_threads(); }
+    printf("Batched TTV (OpenMP x%d)  I=%d  J=%d  K=%d\n", nthreads, I, J, K);
+
+    long IJK = (long)I * J * K;
+    float *Y = (float *)malloc(IJK * sizeof(float));
     if (!Y) { fprintf(stderr, "malloc failed\n"); return 2; }
 
     struct timespec t0, t1;
     double sec;
+    char label[32];
+    snprintf(label, sizeof(label), "OpenMP-%d", nthreads);
 
     FILE *csv = fopen("results.csv", "a");
     if (!csv) { fprintf(stderr, "Cannot open results.csv\n"); return 3; }
@@ -185,7 +173,7 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=1 n=3  out %d x %d : %.6f s\n", J, K, sec);
-    fprintf(csv, "Serial,m1n3,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m1n3,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     /* ---------- (m=1, n=2) ---------- */
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -193,7 +181,7 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=1 n=2  out %d x %d : %.6f s\n", K, J, sec);
-    fprintf(csv, "Serial,m1n2,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m1n2,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     /* ---------- (m=2, n=3) ---------- */
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -201,7 +189,7 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=2 n=3  out %d x %d : %.6f s\n", I, K, sec);
-    fprintf(csv, "Serial,m2n3,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m2n3,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     /* ---------- (m=3, n=2) ---------- */
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -209,7 +197,7 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=3 n=2  out %d x %d : %.6f s\n", I, J, sec);
-    fprintf(csv, "Serial,m3n2,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m3n2,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     /* ---------- (m=2, n=1) ---------- */
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -217,7 +205,7 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=2 n=1  out %d x %d : %.6f s\n", K, I, sec);
-    fprintf(csv, "Serial,m2n1,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m2n1,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     /* ---------- (m=3, n=1) ---------- */
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -225,11 +213,9 @@ int main(int argc, char *argv[])
     clock_gettime(CLOCK_MONOTONIC, &t1);
     sec = elapsed_sec(t0, t1);
     printf("  m=3 n=1  out %d x %d : %.6f s\n", J, I, sec);
-    fprintf(csv, "Serial,m3n1,%d,%d,%d,%.6f\n", I, J, K, sec);
+    fprintf(csv, "%s,m3n1,%d,%d,%d,%.6f\n", label, I, J, K, sec);
 
     fclose(csv);
-    free(X);
-    free(U);
-    free(Y);
+    free(X); free(U); free(Y);
     return 0;
 }
