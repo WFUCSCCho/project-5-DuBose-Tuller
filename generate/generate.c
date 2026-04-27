@@ -4,9 +4,8 @@
  *
  * File format (native endian, same machine assumed):
  *   int32   I, J, K
- *   float   X[I*J*K]   column-major: X[i + j*I + k*I*J]
- *   float   U[I*J*K]   flat buffer; each TTV case slices it as needed
- *                       (largest per-case U is max(IJ, JK, IK) <= IJK)
+ *   float   X[I*J*K]             column-major: X[i + j*I + k*I*J]
+ *   float   U[max(IJ, IK, JK)]   sufficient for all six TTV cases
  *
  * Usage: ./generate <I> <J> <K> <output_path>
  */
@@ -24,27 +23,34 @@ int main(int argc, char *argv[])
     int K = atoi(argv[3]);
     const char *path = argv[4];
 
-    long IJK = (long)I * J * K;
+    long IJK  = (long)I * J * K;
+    long IJ   = (long)I * J;
+    long IK   = (long)I * K;
+    long JK   = (long)J * K;
+    long Ulen = IJ > IK ? IJ : IK;
+    if (JK > Ulen) Ulen = JK;
 
-    float *X = (float *)malloc(IJK * sizeof(float));
-    float *U = (float *)malloc(IJK * sizeof(float));
+    float *X = (float *)malloc(IJK  * sizeof(float));
+    float *U = (float *)malloc(Ulen * sizeof(float));
     if (!X || !U) { fprintf(stderr, "malloc failed\n"); return 2; }
 
     srand(42);
-    for (long n = 0; n < IJK; n++) X[n] = (float)rand() / RAND_MAX;
-    for (long n = 0; n < IJK; n++) U[n] = (float)rand() / RAND_MAX;
+    for (long n = 0; n < IJK;  n++) X[n] = (float)rand() / RAND_MAX;
+    for (long n = 0; n < Ulen; n++) U[n] = (float)rand() / RAND_MAX;
 
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "Cannot open %s for writing\n", path); return 3; }
-    fwrite(&I, sizeof(int),   1,   f);
-    fwrite(&J, sizeof(int),   1,   f);
-    fwrite(&K, sizeof(int),   1,   f);
-    fwrite(X,  sizeof(float), IJK, f);
-    fwrite(U,  sizeof(float), IJK, f);
+    fwrite(&I, sizeof(int),   1,    f);
+    fwrite(&J, sizeof(int),   1,    f);
+    fwrite(&K, sizeof(int),   1,    f);
+    fwrite(X,  sizeof(float), IJK,  f);
+    fwrite(U,  sizeof(float), Ulen, f);
     fclose(f);
 
-    printf("Wrote %s  I=%d J=%d K=%d  (%.1f MB)\n",
-           path, I, J, K, (double)(2 * IJK * sizeof(float)) / (1 << 20));
+    printf("Wrote %s  I=%d J=%d K=%d  X=%.1f MB  U=%.1f MB\n",
+           path, I, J, K,
+           (double)(IJK  * sizeof(float)) / (1 << 20),
+           (double)(Ulen * sizeof(float)) / (1 << 20));
     free(X); free(U);
     return 0;
 }
