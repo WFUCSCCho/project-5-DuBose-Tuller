@@ -542,4 +542,17 @@ It compiles now, but only the first column of the result (10x10x10) is nonzero. 
   error log for a CUDA out-of-memory error at the 2k problem size. (disable recaps in /config)                                
                                                                                                                               
 ❯ Ah ok, so it seems like we need to support data problems larger than VRAM for the GPU case, and we need to make the timing  
-  comparison more fair
+  comparison more fair                                                                                                     
+                                                                                                                              
+⏺ Two clean fixes needed: chunk the tensor over the k-dimension so any size fits in VRAM, and wrap everything (H2D + kernel + 
+  D2H) in clock_gettime to match what the serial/OMP versions time.                                                         
+
+  Let me look at the generate code to confirm the data layout before writing anything. 
+  ⏺ Good. K-slices are contiguous (each is I*J floats in sequence), so chunking over k is a single cudaMemcpy per chunk with no
+  scatter/gather. Here's the plan:                   
+
+  1. Query free VRAM with cudaMemGetInfo, compute how many k-slices fit                                                       
+  2. Loop over k-chunks: H2D slice → kernel → continue (no D2H mid-loop)
+  3. One D2H at the end for Y                                                                                                 
+  4. clock_gettime wraps the entire thing (H2D + kernels + D2H) to match serial/OMP timing                                    
+  5. Remove the dead setup_kernel/generateRandomNumbers/dimGrid3 code that prevents compilation 
