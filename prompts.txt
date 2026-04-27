@@ -425,3 +425,121 @@ It compiles now, but only the first column of the result (10x10x10) is nonzero. 
   - Timing excludes I/O — data is loaded before the clock starts in all three variants
   - OpenMP label encodes thread count (OpenMP-16 etc.) so you can sweep thread counts for a scaling plot
   - The omp.h IDE warning is expected on your Mac — it will resolve on the cluster where GCC+OpenMP is available
+
+❯ can you help me understand the results of the results from running benchmark.sh? They are                                   
+  Serial,m1n3,1000,1000,1000,3.336738                                                                                         
+  Serial,m1n2,1000,1000,1000,3.357603                                                                                         
+  Serial,m2n3,1000,1000,1000,3.367251                                                                                         
+  Serial,m3n2,1000,1000,1000,3.485104                                                                                         
+  Serial,m2n1,1000,1000,1000,6.816145                                                                                         
+  Serial,m3n1,1000,1000,1000,9.814947                                                                                         
+  Serial,m1n3,1000,1000,1000,3.336937                                                                                         
+  Serial,m1n2,1000,1000,1000,3.352237                                                                                         
+  Serial,m2n3,1000,1000,1000,3.362666                                                                                         
+  Serial,m3n2,1000,1000,1000,3.481674                                                                                         
+  Serial,m2n1,1000,1000,1000,6.843480                                                                                         
+  Serial,m3n1,1000,1000,1000,9.824618                                                                                         
+  OpenMP-1,m1n3,1000,1000,1000,3.356879                                                                                       
+  OpenMP-1,m1n2,1000,1000,1000,3.375670                                                                                       
+  OpenMP-1,m2n3,1000,1000,1000,3.396094                                                                                       
+  OpenMP-1,m3n2,1000,1000,1000,3.523682                                                                                       
+  OpenMP-1,m2n1,1000,1000,1000,6.645110                                                                                       
+  OpenMP-1,m3n1,1000,1000,1000,9.934510                                                                                       
+  OpenMP-2,m1n3,1000,1000,1000,1.676066                                                                                       
+  OpenMP-2,m1n2,1000,1000,1000,1.686750                                                                                       
+  OpenMP-2,m2n3,1000,1000,1000,1.705546                                                                                       
+  OpenMP-2,m3n2,1000,1000,1000,1.762234                                                                                       
+  OpenMP-2,m2n1,1000,1000,1000,5.097714                                                                                       
+  OpenMP-2,m3n1,1000,1000,1000,6.807754                                                                                       
+  OpenMP-4,m1n3,1000,1000,1000,0.842353                                                                                       
+  OpenMP-4,m1n2,1000,1000,1000,0.849997                                                                                       
+  OpenMP-4,m2n3,1000,1000,1000,0.877485                                                                                       
+  OpenMP-4,m3n2,1000,1000,1000,0.891385                                                                                       
+  OpenMP-4,m2n1,1000,1000,1000,5.619736                                                                                       
+  OpenMP-4,m3n1,1000,1000,1000,4.552023                                                                                       
+  OpenMP-8,m1n3,1000,1000,1000,0.423909                                                                                       
+  OpenMP-8,m1n2,1000,1000,1000,0.433951                                                                                       
+  OpenMP-8,m2n3,1000,1000,1000,0.451303                                                                                       
+  OpenMP-8,m3n2,1000,1000,1000,0.454382                                                                                       
+  OpenMP-8,m2n1,1000,1000,1000,3.314053                                                                                       
+  OpenMP-8,m3n1,1000,1000,1000,4.311058                                                                                       
+  OpenMP-16,m1n3,1000,1000,1000,0.217994                                                                                      
+  OpenMP-16,m1n2,1000,1000,1000,0.229770                                                                                      
+  OpenMP-16,m2n3,1000,1000,1000,0.288706                                                                                      
+  OpenMP-16,m3n2,1000,1000,1000,0.288282                                                                                      
+  OpenMP-16,m2n1,1000,1000,1000,2.744561                                                                                      
+  OpenMP-16,m3n1,1000,1000,1000,2.709995                                                                                      
+  OpenMP-32,m1n3,1000,1000,1000,0.130317                                                                                      
+  OpenMP-32,m1n2,1000,1000,1000,0.147855                                                                                      
+  OpenMP-32,m2n3,1000,1000,1000,0.157340                                                                                      
+  OpenMP-32,m3n2,1000,1000,1000,0.161568                                                                                      
+  OpenMP-32,m2n1,1000,1000,1000,2.535060                                                                                      
+  OpenMP-32,m3n1,1000,1000,1000,2.954077                                                                                      
+  GPU,m2n1,1000,1000,1000,0.019307                                                                                            
+   The GPU is still much faster than OpenMP. Is this because the problem size still fits on a GPU? I scaled from 1k to 2k (up 
+   8x) and now it is so slow that I can't tell if it's working anymore                                                        
+
+⏺ Let me look at the code to understand what's being benchmarked.
+
+⏺ Now I have a complete picture. Let me break down what you're seeing.    
+                                                                                           
+  The result format is Implementation, Case(mMnN), I, J, K, Time(seconds).                                                    
+                                                                                                                              
+  ---                                                                                                                         
+  Why some cases are slower than others                                                                                       
+                                                                                                                              
+  The tensor X is stored column-major: X[i + j*I + k*I*J]. The innermost summation loop accesses X with different strides
+  depending on which mode is being contracted:                                                                                
+  
+  ┌────────────┬──────────────────┬──────────────┬─────────────────────────────┐                                              
+  │    Case    │ Inner loop index │   X stride   │             Why             │                                            
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤                                              
+  │ m1n3, m1n2 │ i                │ 1 (stride-1) │ Sequential — cache loves it │                                            
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤
+  │ m2n3, m3n2 │ j or k           │ I = 1000     │ 4KB jumps                   │                                              
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤                                              
+  │ m3n1       │ k                │ I×J = 10⁶    │ 4MB jumps — cache disaster  │                                              
+  └────────────┴──────────────────┴──────────────┴─────────────────────────────┘                                              
+                                                                                                                            
+  That's why m3n1 takes ~10s and m1n3 takes ~3.3s, even though both do exactly I×J×K = 1B multiply-adds.                      
+                                                                                                                            
+  ---                                                                                                                         
+  OpenMP scaling                                                                                                            
+                
+  The cache-friendly cases (m1n3–m3n2) scale almost perfectly — at 32 threads you get ~25x speedup. The m2n1/m3n1 cases only
+  get ~3x at 32 threads because they're bandwidth-bottlenecked: more threads just fight harder over the same memory bus.      
+  
+  ---                                                                                                                         
+  Why the GPU obliterates OpenMP                                                                                            
+                                
+  The GPU timing (0.019s) only covers the kernel + D2H copy — the H2D transfer of the 4GB tensor is not timed (look at where
+  cudaEventRecord(start) is called, line 121, after the memcpys). So you're comparing GPU kernel execution to full CPU wall   
+  time, which gives you an even more dramatic number. Even accounting for that, the GPU wins because:
+                                                                                                                              
+  1. It dispatches ~1M threads (one per (i,k) output element) all at once vs 32 CPU threads                                   
+  2. GPU HBM bandwidth is ~10–20x higher than CPU DRAM bandwidth
+                                                                                                                              
+  ---                                                                                                                       
+  Why 2k is painfully slow
+                                                                                                                              
+  The work scales as N³. Going from 1k to 2k:
+                                                                                                                              
+  - Data: 1k tensor = 4 GB → 2k tensor = 32 GB (8×)                                                                           
+  - Work: 1B ops → 8B ops (8×)
+                                                                                                                              
+  So each case takes ~8× longer. Your 1k serial run took ~30s total for all 6 cases. At 2k that's ~4 minutes just for serial, 
+  then 6 OpenMP thread counts × ~2–6 min each = easily 30–45 minutes for the whole benchmark.                                 
+                                                                                                                              
+  For the GPU at 2k: the tensor is 32 GB. cudaMalloc for that will almost certainly fail (most cluster GPUs have 16–40 GB),   
+  and CHECK_CUDA will call exit(1). The GPU job isn't slow — it's probably crashing silently and the slow part you're
+  observing is the serial/OpenMP portion of the benchmark running before the GPU step.                                        
+                                                                                                                            
+  Check your SLURM error log (bench-<jobid>.err) — you'll likely see a "CUDA Error: out of memory" line from the GPU step.    
+  
+✻ Crunched for 2m 2s                                                                                                          
+                                                                                                                            
+※ recap: We were analyzing benchmark results for a batched tensor-times-vector project. The next step is checking the SLURM   
+  error log for a CUDA out-of-memory error at the 2k problem size. (disable recaps in /config)                                
+                                                                                                                              
+❯ Ah ok, so it seems like we need to support data problems larger than VRAM for the GPU case, and we need to make the timing  
+  comparison more fair
