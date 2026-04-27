@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -O0 -Wall -std=c99
+CFLAGS  = -Wall
 TARGET  = batched_ttv
 
 $(TARGET): batched_ttv.c

@@ -107,12 +107,6 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
 
-    // Fill input matrices with random values ON KERNEL
-    // This is also considered the kernel's 'warm-up' for timing
-    setup_kernel<<<dimGrid3, dimBlock>>>(dev_states, time(NULL), I, J, K);
-    generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_X, I, J, K);
-    generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_U, J, I, 1);
-
     CHECK_CUDA(cudaEventRecord(start)); // This happens on the GPU!
 
     bttv_m_2_n_1<<<dimGrid, dimBlock>>>(dev_X, dev_U, dev_Y, I, J, K);

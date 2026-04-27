@@ -185,3 +185,243 @@ It compiles now, but only the first column of the result (10x10x10) is nonzero. 
   generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_U, J, I, 1);                                                  
   // ...                                                                                                                      
   bttv_m_2_n_1<<<dimGrid, dimBlock>>>(...);
+
+❯ @parallel/batched_ttv.cu currently works for the m=2, n=1 case as expected. However, when the problem size is too large     
+  (larger than the GPU memory) there is an allocation error. What is the best way to handle problem sizes that are larger     
+  than the GPU's memory? For this particular project, we are just generating random entries on the fly. I can do problems of  
+  1000 x 1000 x 100, but not 1000 x 1000 x 1000 (I beleive we have 8GB of VRAM total if that helps).                          
+  ⎿  Read parallel/batched_ttv.cu (161 lines)
+
+⏺ Looking at the memory usage:
+  - dev_X: I×J×K floats → 1000³ × 4B = 4 GB
+  - dev_states: I×J×K curandState_t → 1000³ × 48B = 48 GB (the real culprit)
+
+  Since you're generating random data purely for testing, the best approach is on-the-fly generation — eliminate X entirely by
+   having each compute thread generate its own random values inline using a per-thread curandState_t. Memory drops to just U
+  (4 MB) + Y (4 MB).
+
+  The tradeoff is that curand_init adds overhead per thread, but for J=1000 it's amortized over 1000 multiply-accumulates, so
+  it should be acceptable. Let me implement this:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Tool use rejected
+
+⏺ That's a fair point — if X needs to be consistent across multiple operations (e.g., loaded from a file), on-the-fly
+  generation per-compute-thread won't work.
+
+  The real answer is tiling over K, combined with moving X generation to the CPU (or a file). Here's the memory breakdown of
+  why it breaks:
+
+  ┌──────────────┬────────────────────────────────────────┐
+  │    Array     │              Size (1000³)              │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_states   │ 1000³ × 48B = 48 GB (the main culprit) │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_X        │ 1000³ × 4B = 4 GB                      │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_U, dev_Y │ ~4 MB each (negligible)                │
+  └──────────────┴────────────────────────────────────────┘
+
+  The fix: generate X on the CPU (representative of a real disk-load) and process X in K-tiles that fit in VRAM. No states
+  array on the GPU at all.
+
+  For I=J=K=1000 with tile_K=200:
+    X tile on GPU: 1000 × 1000 × 200 × 4B = 800 MB  ✓
+    U:             1000 × 1000 × 4B        = 4 MB    ✓
+    Y:             1000 × 1000 × 4B        = 4 MB    ✓
+
+  The loop structure becomes:
+  cpu_X = rand_fill(I*J*K)           // on host RAM
+  for k_start in range(0, K, tile_K):
+      cudaMemcpy(dev_X_tile, cpu_X + k_start*I*J, tile_K*I*J)
+      bttv_kernel<<<...>>>(dev_X_tile, dev_U, dev_Y_tile, I, J, tile_K)
+      cudaMemcpy(Y + k_start*I, dev_Y_tile, tile_K*I)
+
+  You can also overlap the next tile's cudaMemcpy with the current tile's kernel execution using CUDA streams and pinned
+  (page-locked) host memory for better throughput.
+
+  Want me to implement this tiling version? I'd also need to pick a tile_K — either hardcoded, auto-computed from a memory
+  budget, or passed as a CLI argument.
+
+✻ Worked for 2m 6s
+
+❯ Hmm this is making me question the validity of this project. The point is to demonstrate an algorithm that GPUs can speed   
+  up @README.md The problem is that, in my understanding, its not like the GPU threads can read from disk directly, and the   
+  dot products likely take much less time that the syscalls. I was hoping to achieve scale large than what can fit on a       
+  single CPUs reasonable memory, but perhaps that does not make sense for this project. What I worry about for the batched    
+  ttv is that the cost will be dominated by loading X anyway, but maybe that's ok if the GPU cost still achives significant   
+  speedup over the serial implementation. Thoughts?                                                                           
+  ⎿  Read README.md (82 lines)
+
+⏺ Your concern is valid but I think the framing resolves it. Let me walk through the arithmetic:
+
+  What the benchmark actually measures
+
+  X is generated in GPU VRAM (not loaded from disk). So the relevant comparison is:
+  - Serial CPU: reads X from DDR4 RAM (~50 GB/s bandwidth)
+  - Parallel GPU: reads X from GPU VRAM (~500-900 GB/s bandwidth)
+
+  Disk I/O never enters the picture. The speedup comes from memory bandwidth, not compute.
+
+  This algorithm is memory-bandwidth-bound — which is fine
+
+  Arithmetic intensity for one output element Y[k,i]:
+  - Load J floats from X, J floats from U → ~8J bytes
+  - Do 2J FLOPs (multiply-accumulate)
+  - AI ≈ 0.25 FLOP/byte
+
+  Low AI means it's bandwidth-bound, but GPU bandwidth advantage over CPU RAM is 10-20x. That's a real and meaningful speedup.
+   "Memory-bandwidth-bound operations benefit from GPU's high-bandwidth memory" is a perfectly valid HPC story.
+
+  What this means for scope
+
+  Scaling beyond VRAM doesn't make sense for this project — once you're streaming through PCIe (~16 GB/s), you're slower than
+  CPU RAM. The interesting regime is entirely within VRAM. Your 1000×1000×100 case works; just benchmark a sweep of sizes that
+   fit (e.g., varying K from 10 to 100, varying I/J from 100 to 1000) and show the speedup curve.
+
+  One flag worth knowing
+
+  The current kernel likely has poor memory coalescing: consecutive threads (varying k, your x-dim) access X[i + j*I + k*I*J]
+  with stride I*J between them — that's up to 4MB between adjacent threads in a warp, which will hurt measured throughput
+  significantly. This might be worth fixing before benchmarking if you want results that reflect the algorithm's true
+  potential rather than the coalescing penalty.
+
+  The project is fine — you just don't need to scale beyond VRAM.
+
+✻ Cooked for 53s
+
+※ recap: Working on a CUDA batched tensor-times-vector (BTTV) implementation for a GPU vs CPU benchmarking project. The
+  immediate next step is fixing the memory coalescing issue in the kernel before running benchmarks. (disable recaps in
+  /config)
+
+❯ Well, as the README says, there needs to be a 5-10 page technical report. I think having multiple                           
+  experiments/configurations will be useful, I would be interested personally to know how it compares to using multiple CPUs, 
+   which we do have access to on this cluster. Let's keep them in separate files and allow for clean comparison. I think we   
+  should pick a consistent data loading mechanism/location for all too. But first, let's fix the memory coalescing issue.
+
+⏺ Let me read the file again to make sure I have the current state before editing.
+
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Unchanged since last read
+
+⏺ The fix involves two changes: swap which thread dimension maps to i vs k (so consecutive threads in a warp access
+  consecutive i values, giving stride-1 reads of X[i + j*I + k*I*J]), and update dimGrid and Y indexing to match.
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 6 lines, removed 6 lines
+      70   * U layout: J x I  (column i holds the vector for batch element i)
+      71   * ------------------------------------------------------------------ */
+      72  __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
+      73 -    int k = threadIdx.x + blockIdx.x * blockDim.x;                                                           
+      74 -    int i = threadIdx.y + blockIdx.y * blockDim.y;                                                           
+      75 -    if (k < K && i < I) {                                                                                    
+      73 +    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1 (coalesced)                
+      74 +    int i = threadIdx.x + blockIdx.x * blockDim.x;                                                           
+      75 +    int k = threadIdx.y + blockIdx.y * blockDim.y;                                                           
+      76 +    if (i < I && k < K) {                                                                                    
+      77          float sum = 0;
+      78          for (int j = 0; j < J; ++j) {
+      79              sum += X[i + j*I + k*I*J] * U[j + i*J];
+      80          }
+      80 -                                                                                                             
+      81 -        Y[k + i*K] = sum;                                                                                    
+      81 +        // Y stored as I×K so writes are also stride-1 coalesced                                             
+      82 +        Y[i + k*I] = sum;                                                                                    
+      83      }
+      83 -                                                                                                             
+      84  }
+      85  
+      86  
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 1 line
+      113      CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
+      114  
+      115      dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
+      116 -    dim3 dimGrid((K / T) + 1, (I / T) + 1);                                                                 
+      116 +    dim3 dimGrid((I / T) + 1, (K / T) + 1);                                                                 
+      117      dim3 dimBlock(T,T);
+      118  
+      119      cudaEvent_t start, stop;
+
+⏺ Now fix the writeMatrix and cudaMemcpy calls since Y is now I×K instead of K×I:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Tool use rejected
+
+⏺ Good catch. The Y write is 1 write per output element (not in a loop), so the performance impact is much smaller than the X
+  reads which happen J times per element. Permuting Y could also require an explicit transpose downstream in an MTTKRP chain,
+  which costs a full extra memory pass — likely worse than the non-coalesced write.
+
+  I need to revert the Y[i + k*I] change I already made in the kernel since the downstream write call was left as K, I. Let me
+   fix that:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 2 lines
+      78          for (int j = 0; j < J; ++j) {
+      79              sum += X[i + j*I + k*I*J] * U[j + i*J];
+      80          }
+      81 -        // Y stored as I×K so writes are also stride-1 coalesced                                             
+      82 -        Y[i + k*I] = sum;                                                                                    
+      81 +        Y[k + i*K] = sum;                                                                                    
+      82      }
+      83  }
+      84  
+
+⏺ Also remove the stale comment from the kernel signature:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 1 line
+      70   * U layout: J x I  (column i holds the vector for batch element i)
+      71   * ------------------------------------------------------------------ */
+      72  __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
+      73 -    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1 (coalesced)                
+      73 +    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1                            
+      74      int i = threadIdx.x + blockIdx.x * blockDim.x;
+      75      int k = threadIdx.y + blockIdx.y * blockDim.y;
+      76      if (i < I && k < K) {
+
+⏺ The coalescing fix is now correct and minimal: the dominant X reads are coalesced (J reads per element, stride 1), and Y
+  layout is left untouched (K×I, 1 write per element — not worth permuting). Let me verify the final state:
+
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu · lines 67-96)
+  ⎿  Read 30 lines
+
+⏺ Good. The coalescing fix is clean — threadIdx.x → i so the inner-loop X reads hit consecutive memory addresses. The Y write
+  stays K×I, so no permutation cost downstream.
+
+  To summarize what changed and what's still non-coalesced:
+  - X reads (fixed): stride 1 — fixed the dominant access, J reads per output element
+  - Y writes (intentionally left): stride K — 1 write per output element, not worth the permutation overhead
+  - U reads (cached): stride J — U is only J×I (~4 MB for 1000²), stays in L2 cache across all K iterations
+
+  Ready to discuss the data loading strategy and the multi-experiment structure whenever you are.
+
+⏺ Good picture now. Here's the plan:
+
+  - generate/: new standalone binary that writes a fixed-seed X and U to a .bin file (header: I,J,K; then X and U as float
+  arrays)
+  - serial/batched_ttv.c: reads from the bin file, switch double→float, bump -O0 to -O2
+  - parallel/batched_ttv_omp.c: new file — same 6 cases as serial but with #pragma omp parallel for collapse(2), reads same
+  bin file
+  - parallel/batched_ttv.cu: drop curand generation, read from bin file, cudaMemcpy to device
+  - Makefiles updated throughout; .gitignore gets data/
+
+  Writing all files now.
+
+  ⏺ Good. Here's the full workflow now:
+
+  # 1. Generate data once (example: 500×500×100, ~96 MB)
+  cd generate && make && ./generate 500 500 100 ../data/tensor_500_500_100.bin
+
+  # 2. Run all three on the same file
+  ./serial/batched_ttv    ../data/tensor_500_500_100.bin
+  OMP_NUM_THREADS=16 ./parallel/batched_ttv_omp ../data/tensor_500_500_100.bin
+  ./parallel/batched_ttv  ../data/tensor_500_500_100.bin
+
+  All three append to results.csv with the format Type,case,I,J,K,seconds. A few things to note:
+
+  - Serial and OpenMP run all 6 cases; GPU runs only m=2,n=1 (you can extend later)
+  - Timing excludes I/O — data is loaded before the clock starts in all three variants
+  - OpenMP label encodes thread count (OpenMP-16 etc.) so you can sweep thread counts for a scaling plot
+  - The omp.h IDE warning is expected on your Mac — it will resolve on the cluster where GCC+OpenMP is available
