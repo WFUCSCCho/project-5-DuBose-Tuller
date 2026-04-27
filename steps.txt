@@ -1,0 +1,4 @@
+1. Convert MEX code to C
+2. Port matmul code for CUDA starter code
+3. Replace matmul with a dot product kernel operating on linear indices
+4. Think about problem sizes bigger that VRAM

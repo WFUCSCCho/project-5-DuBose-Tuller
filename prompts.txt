@@ -33,3 +33,155 @@ Yes, this fits the requirements well. Here's my assessment:
   Overall: solid choice.
 
 Can you perform the MEX to plain C port please? Let's start with all six cases and then later I will focus on parallelizing them one at a time
+
+
+
+Can you help me fix up @parallel/batched_ttv.cu ? We are doing one case of @serial/batched_ttv.c . I adapted the GPU code from a square matrix     
+  multiplication example I already had. One TODO I already know about it that I need to multiply the *transpose* of each X slice by the column of U, 
+   but I am sure there are more.                                                                                                                     
+  ⎿  Read parallel/batched_ttv.cu (174 lines)                                                                                                        
+  ⎿  Read serial/batched_ttv.c (236 lines)                                                                                                           
+                                                                                                                                                     
+⏺ Looking at both files, I can see multiple bugs beyond the transpose TODO. Let me enumerate them all before fixing:                                 
+                                                                                                                                                     
+  1. Missing #include <curand_kernel.h> — curandState_t won't be found                                                                               
+  2. Kernel bttv_m_2_n_1: threadIdx.i doesn't exist (missing semicolon too), I/J/K are passed as int* but used as values, and the body is a stub   
+  3. The transpose TODO: the formula Y[k+i*K] = sum_j X[i+j*I+k*I*J] * U[j+i*J] is already the correct math — no separate matrix multiply needed,    
+  just one dot product per output element                                                                                                          
+  4. main line 108: int J = strtol(argv[3]...) — duplicate J, should be K                                                                            
+  5. main line 109: printf references undefined n                                                                                                  
+  6. main lines 115, 123–125, 168–173: A/B/C and dev_A/dev_B/dev_C should be X/U/Y and dev_X/dev_U/dev_Y                                             
+  7. main line 126: dev_states sized n*n should be I*J*K
+  8. main line 142: copies uninitialized Y host→device before the kernel (unnecessary/wrong direction)
+  9. Timing: stop event is recorded after the D2H memcpy — should be right after the kernel
+  10. main line 163: sec undefined (use milliseconds/1000.0f), csv FILE pointer name mismatch with result
+  11. Grid dims: the bttv kernel works over (K, I), not the full 3D tensor
+
+
+Can we talk through the ideas one by one instead of overwriting the whole thing?                                            
+                                                                                   
+⏺ Absolutely. Let me start with the most fundamental one — the kernel itself.                                                 
+                                                                                                                            
+  The key insight is that you don't actually need multiplyMatrices at all. The math for case (m=2, n=1) is:                   
+  
+  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]                                                                         
+                                                                                                                              
+  That's just a dot product — for each output element (k, i), you walk over j and accumulate. So the natural GPU parallelism  
+  is: one thread per (k, i) pair, with a serial loop over j. No matrix multiply kernel needed.                                
+                                                                                                                              
+  The "transpose" you were thinking about is already baked into the index formula — X[i + j*I + k*I*J] with i fixed is        
+  stepping through the tensor in a way that corresponds to reading the transpose of a slice.
+                                                                                                                              
+  Does that match your mental model, or did you have a different approach in mind (e.g., using shared memory tiling via       
+  multiplyMatrices)?
+                                                                                                                              
+❯ That's a good point. I have updated the structure to reflect that.                                                          
+                                                                                                                            
+⏺ Let me see the current state of the file.                                                                                   
+                                                                                                                            
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Good progress — the structure is right. Let me walk through the remaining issues in order of importance.                    
+                                                                                                                            
+  Next up: the kernel body (lines 77–81). The ?? placeholders are just the index formulas from the serial code, directly      
+  translated:                                                                                                                 
+                                                                                                                              
+  sum += X[i + j*I + k*I*J] * U[j + i*J];                                                                                     
+  // ...                                                                                                                      
+  Y[k + i*K] = sum;
+                                                                                                                              
+  Also two other issues in the kernel:                                                                                        
+  1. Line 77: for (int j = 0, j < J, ++j) — commas should be semicolons
+  2. Lines 73–74: k = threadIdx.x and i = threadIdx.y — these only work for a single block. You need blockIdx too: k =        
+  blockIdx.x * blockDim.x + threadIdx.x                                                                                     
+                                                                                                                              
+  Want to fix those, then we'll move on to the main bugs?                                                                   
+                                                                                                                              
+❯ Done                                                                                                                        
+                                                                                                                              
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Kernel looks correct. Moving to main — let's take the compile errors first since they'll block everything else.             
+                                                                                                                              
+  Lines 95–96: Two issues:                                                                                                    
+  - int J = strtol(argv[3]...) — second declaration of J, should be int K                                                     
+  - printf("... n = %d\n", n) — n is never defined; you probably want something like "I=%d J=%d K=%d\n", I, J, K              
+                                                                                                                              
+  Want to fix those two, then we'll tackle the cudaMalloc variable name mismatches?                                           
+                                                                                                                              
+❯ done
+
+
+Did all 3. I am not curious about what to do for the states? I don't really understand how those work. Especially since the 
+   two things we are randomizing have different sizes                                                                         
+                                                                                                                              
+⏺ Good question. Here's the mental model:                                                                                     
+                                                                                                                              
+  Each curandState_t is one independent RNG. curand_init(seed, sequence, offset, &state) sets up a unique RNG sequence for    
+  that state — the sequence number (which you set to the array index idx) is what makes each state independent from the       
+  others. Then curand_uniform advances that state and returns one float.                                                      
+                                                                                                                              
+  For your two arrays: X needs I*J*K random numbers, U needs J*I. The simplest approach is to allocate I*J*K states (enough   
+  for X), then reuse a subset of them for U.
+                                                                                                                              
+  The generateRandomNumbers call for U already does this — it passes (J, I, 1) as dimensions, so the kernel computes idx = j +
+   i*J, which only touches states at indices [0, I*J-1]. Those are all within the I*J*K allocation.
+                                                                                                                              
+  The one subtlety: those states were already advanced once (to fill X's first slice), so U gets the second number from each  
+  of those sequences rather than the first. For a benchmark this is completely fine — the values are still pseudo-random.
+                                                                                                                              
+  So the fix for line 113 is just:                                                                                            
+  CHECK_CUDA(cudaMalloc(&dev_states, (long)I*J*K*sizeof(curandState_t)));
+                                                                                                                              
+  The (long) cast avoids integer overflow if I, J, K are large. Does that make sense?                                         
+                                                                                                                              
+❯ Yes, anything else?                                                                                                         
+                                                                                                                              
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Good progress. A few more remaining:                                                                                        
+                                                                                                                              
+  Compile errors (easy fixes):                                                                                                
+  - Line 102: A/B/C → X/U/Y                                                                                                   
+  - Lines 155–160: dev_A/dev_B/dev_C and A/B/C → dev_X/dev_U/dev_Y and X/U/Y                                                  
+  - Line 150: csv → result, and sec → milliseconds / 1000.0f                                                                  
+                                                                                                                              
+  Silent bug — the grid for setup/generate (line 115): dimGrid is 2D, but setup_kernel and generateRandomNumbers use          
+  threadIdx.z + blockIdx.z * blockDim.z to compute slc. With a 2D grid, blockIdx.z is always 0 and threadIdx.z is always 0, so
+   slc is always 0 — only the first K-slice of X gets filled with random numbers, the rest are uninitialized. You need a      
+  separate 3D grid for those two kernels:                                                                                     
+  dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1);                                                                     
+  and use that for setup_kernel and generateRandomNumbers, keeping the 2D dimGrid for bttv_m_2_n_1.
+                                                                                                                              
+  Timing bug (lines 128–137): cudaEventRecord(stop) is called after the D2H memcpy, so you're timing the kernel + synchronize 
+  + memcpy. Move stop to right after the kernel launch (CUDA events are queued on the GPU timeline, so it'll naturally record 
+  when the kernel finishes):                                                                                                  
+  bttv_m_2_n_1<<<dimGrid, dimBlock>>>(...);                                                                                   
+  CHECK_CUDA(cudaEventRecord(stop));                                                                                        
+  CHECK_CUDA(cudaEventSynchronize(stop));
+  // then do the memcpy                  
+  Also remove line 129 entirely — copying uninitialized Y host→device before the kernel is pointless.                         
+                                                                                                     
+  Want to work through those in order?
+
+
+It compiles now, but only the first column of the result (10x10x10) is nonzero. What could that mean?                       
+                                                                                                                              
+⏺ That's exactly the 3D grid bug I mentioned. The dimGrid is 2D, so blockIdx.z is always 0, meaning slc is always 0 in both   
+  setup_kernel and generateRandomNumbers. Only the k=0 slice of X gets filled with random numbers — the rest is effectively 0,
+   so all the dot products for k>0 come out zero.
+                                                                                                                              
+  The fix: use a separate 3D grid for setup and generation, then keep the 2D grid for the bttv kernel:                        
+                                                                                                                              
+  dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1);                                                                       
+  dim3 dimGrid((K / T) + 1, (I / T) + 1);                                                                                     
+  dim3 dimBlock(T, T);
+  // ...                                                                                                                      
+  setup_kernel<<<dimGrid3, dimBlock>>>(...);                                                                                
+  generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_X, I, J, K);                                                  
+  generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_U, J, I, 1);                                                  
+  // ...                                                                                                                      
+  bttv_m_2_n_1<<<dimGrid, dimBlock>>>(...);

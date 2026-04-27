@@ -70,17 +70,16 @@ __global__ void generateRandomNumbers(curandState_t* states, float* numbers, int
  * U layout: J x I  (column i holds the vector for batch element i)
  * ------------------------------------------------------------------ */
 __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
-    int k = threadIdx.x + blockIdx.x * blockDim.x;
-    int i = threadIdx.y + blockIdx.y * blockDim.y;
-    if (k < K && i < I) {
+    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int k = threadIdx.y + blockIdx.y * blockDim.y;
+    if (i < I && k < K) {
         float sum = 0;
         for (int j = 0; j < J; ++j) {
             sum += X[i + j*I + k*I*J] * U[j + i*J];
         }
-
         Y[k + i*K] = sum;
     }
-    
 }
 
 
@@ -113,7 +112,7 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
 
     dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
-    dim3 dimGrid((K / T) + 1, (I / T) + 1);
+    dim3 dimGrid((I / T) + 1, (K / T) + 1);
     dim3 dimBlock(T,T);
     
     cudaEvent_t start, stop;
