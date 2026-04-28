@@ -4,7 +4,6 @@
 \usepackage{beamerthemesplit}
 \usepackage{graphicx}
 \usepackage{epstopdf}
-\usepackage[english]{babel}
 \usepackage[latin1]{inputenc}
 \usepackage{times}
 \usepackage[T1]{fontenc}
@@ -28,6 +27,7 @@
 \usetikzlibrary{calc}
 \usetikzlibrary{arrows}
 
+\usepackage{pgfplots}
 \usepackage{pgfplotstable}
 \usepackage{etoolbox}
 \pgfplotsset{compat=1.18}
@@ -85,7 +85,7 @@
 % ============================================================
 \begin{frame}{What is Batched TTV?}
 
-Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stored in column-major order:
+Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stored in column-major (natural) order:
 \[
   \mathcal{X}(i,j,k) \;=\; \texttt{X[i + j*I + k*I*J]}
 \]
@@ -191,13 +191,8 @@ The two outer loops are independent (each computes one output element).
 
 \bigskip
 
-% [FIGURE: Thread scaling plot]
-% Suggested figure: X-axis = number of OMP threads (1, 2, 4, 8, 16, 32),
-% Y-axis = wall time (seconds). One line per case (or group the
-% cache-friendly cases vs cache-unfriendly). Show GPU time as a
-% horizontal dashed line for reference. Data: results_1000.csv, N=1000.
 \begin{center}
-  \Large\color{gray} [Thread scaling figure --- \texttt{results\_1000.csv}]
+\resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
 \end{center}
 
 \end{frame}
@@ -275,24 +270,15 @@ This works because $K$-slices are contiguous in memory (column-major layout).
 \end{frame}
 
 % ============================================================
-\begin{frame}{Results: OpenMP Thread Scaling ($N = 1000$)}
+\begin{frame}{Results: Speedup by Case ($N = 1000$)}
 
-% [FIGURE: Thread scaling at N=1000]
-% Suggested figure: grouped bar chart or line plot.
-% X-axis: thread count (Serial, 1, 2, 4, 8, 16, 32).
-% Y-axis: time (seconds), log scale recommended.
-% Group the six cases, or show two representative ones
-% (e.g., m1n3 as "cache-friendly" and m3n1 as "cache-unfriendly").
-% Data source: results_1000.csv
 \begin{center}
-  \Large\color{gray} [Thread scaling figure]
+\resizebox{0.95\linewidth}{!}{\input{fig/fig1}}
 \end{center}
 
-\bigskip
-
 \begin{itemize}
-  \item Cache-friendly cases ($m{=}1$): near-linear scaling up to 32 threads
-  \item Cache-unfriendly cases ($m{=}3, n{=}1$): limited by memory bandwidth
+  \item OMP-32: up to $27\times$ for cache-friendly cases, but only $\sim3\times$ for unfriendly
+  \item GPU: the opposite --- greatest speedup on the cache-unfriendly cases
 \end{itemize}
 
 \end{frame}
@@ -300,47 +286,13 @@ This works because $K$-slices are contiguous in memory (column-major layout).
 % ============================================================
 \begin{frame}{Results: GPU vs.\ CPU Across Problem Sizes}
 
-% [FIGURE: Size sweep]
-% Suggested figure: line plot, one line per implementation.
-% X-axis: N (500, 750, 1000, 1250, 1500, 1750, 2000).
-% Y-axis: time (seconds), log scale recommended.
-% Lines: Serial, OpenMP-32, GPU.
-% Pick one representative case (e.g., m1n3 or m2n1), or
-% show total time across all six cases.
-% Data source: results from sweep.sh (once available)
 \begin{center}
-  \Large\color{gray} [Problem size sweep figure]
+\resizebox{0.95\linewidth}{!}{\input{fig/fig3}}
 \end{center}
 
-\bigskip
-
 \begin{itemize}
-  \item Work scales as $O(N^3)$; data scales as $O(N^3)$
-  \item GPU timing includes host $\leftrightarrow$ device transfers
-\end{itemize}
-
-\end{frame}
-
-% ============================================================
-\begin{frame}{Results: Per-Case Comparison}
-
-% [FIGURE: Per-case breakdown]
-% Suggested figure: grouped bar chart.
-% X-axis: the six (m,n) cases.
-% Y-axis: time (seconds).
-% Bars: Serial, OMP-32, GPU (at a fixed N, e.g., 1000 or 2000).
-% This highlights how memory layout affects each implementation
-% differently.
-% Data source: results_1000.csv or results_2000.csv
-\begin{center}
-  \Large\color{gray} [Per-case comparison figure]
-\end{center}
-
-\bigskip
-
-\begin{itemize}
-  \item Memory layout affects all implementations, but to different degrees
-  \item GPU coalescing mirrors CPU cache locality --- stride-1 cases win everywhere
+  \item Showing case $(m{=}2, n{=}1)$; GPU timing includes H2D/D2H transfers
+  \item GPU uses $K$-chunking beyond the 8\,GB VRAM limit (dashed line)
 \end{itemize}
 
 \end{frame}
