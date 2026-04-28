@@ -89,13 +89,13 @@
 % ============================================================
 \begin{frame}{What is Batched TTV?}
 
-Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stored in column-major (natural) order:
+Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stored in ``column-major" (natural) order:
 \[
   \mathcal{X}(i,j,k) \;=\; \texttt{X[i + j*I + k*I*J]}
 \]
 
-\textbf{Batched Matrix-Vector product:}
-contract one mode of $\mathcal{X}$ with a vector $\M{u}$, producing a vector. Repeat for each vector in a matrix.
+\textbf{Batched Tensor-Vector product:}
+contract one mode of $\mathcal{X}$ with a matrix $\M{U}$, producing a matrix. 
 
 \medskip
 
@@ -201,19 +201,6 @@ One thread per output element; the inner (contracted) dimension is a serial redu
 
 \end{frame}
 
-% ============================================================
-\begin{frame}{Results: Speedup by Case ($N = 1000$)}
-
-\begin{center}
-\resizebox{0.85\linewidth}{!}{\input{fig/fig1}}
-\end{center}
-
-\begin{itemize}
-  \item OMP-32: benefit depends greatly on batch mode.
-  \item GPU sidesteps cache issues.
-\end{itemize}
-
-\end{frame}
 
 % ============================================================
 \begin{frame}{Challenge: Fitting in GPU Memory}
@@ -277,6 +264,35 @@ This works because $K$-slices are contiguous in memory (column-major layout).
 \end{frame}
 
 % ============================================================
+\begin{frame}{OpenMP attempt}
+\begin{itemize}
+  \item Poor spatial locality slows parallelism down!
+  \item `Unrefined' implementation
+\end{itemize}
+
+
+\begin{center}
+\resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
+\end{center}
+
+\end{frame}
+
+
+% ============================================================
+\begin{frame}{Results: Speedup by Case ($N = 1000$)}
+
+\begin{center}
+\resizebox{0.85\linewidth}{!}{\input{fig/fig1}}
+\end{center}
+
+\begin{itemize}
+  \item OMP-32: benefit depends greatly on batch mode.
+  \item GPU sidesteps cache issues.
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
 \begin{frame}{Conclusions}
 
 \begin{itemize}
@@ -289,19 +305,5 @@ This works because $K$-slices are contiguous in memory (column-major layout).
 
 \end{frame}
 
-% ============================================================
-\begin{frame}{Extras: OpenMP attempt}
-\begin{itemize}
-  \item Poor spatial locality slows parallelism down!
-  \item `Unrefined' implementation
-\end{itemize}
-
-
-
-\begin{center}
-\resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
-\end{center}
-
-\end{frame}
 
 \end{document}
