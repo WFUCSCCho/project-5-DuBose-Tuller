@@ -1,0 +1,364 @@
+\documentclass{beamer}
+
+\usepackage{setspace}
+\usepackage{beamerthemesplit}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\usepackage[english]{babel}
+\usepackage[latin1]{inputenc}
+\usepackage{times}
+\usepackage[T1]{fontenc}
+\usepackage{color}
+\usepackage{colortbl}
+\usepackage{multimedia,xmpmulti}
+\usepackage{multirow,multicol}
+\usepackage[absolute,overlay]{textpos}
+\usepackage{tabularx}
+\usepackage[noend]{algorithm,algpseudocode}
+
+% Macros (minimal subset -- tensor_header not needed)
+\newcommand{\M}[1]{\mathbf{#1}}
+\newcommand{\lt}{\left}
+\newcommand{\rt}{\right}
+
+%% Tikz
+\usepackage{tikz}
+\usetikzlibrary{3d}
+\usetikzlibrary{patterns}
+\usetikzlibrary{calc}
+\usetikzlibrary{arrows}
+
+\usepackage{pgfplotstable}
+\usepackage{etoolbox}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{decorations.pathreplacing}
+
+\graphicspath{{fig/}}
+
+\mode<presentation>
+
+\definecolor{wfugold}{rgb}{0.6196078,0.494117647,0.21960784}
+\usetheme{Warsaw}
+\usecolortheme[named=wfugold]{structure}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}
+{
+  \hbox{
+  \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.25ex,dp=1ex,left]{author in head/foot}%
+    \usebeamerfont{author in head/foot}
+    DuBose Tuller
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.34\paperwidth,ht=2.25ex,dp=1ex,center]{title in head/foot}%
+    \usebeamerfont{title in head/foot}
+
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.25ex,dp=1ex,right]{date in head/foot}%
+    \usebeamerfont{date in head/foot}
+    \insertframenumber{} \hspace*{2ex}
+  \end{beamercolorbox}}%
+}
+
+\title{Parallelizing Batched Tensor-Times-Vector on GPUs}
+\author{DuBose Tuller}
+\institute{CSC 347/647 --- Spring 2026}
+\date{April 28, 2026}
+
+\begin{document}
+
+% ============================================================
+\begin{frame}
+  \titlepage
+\end{frame}
+
+% ============================================================
+\begin{frame}{Motivation}
+
+\begin{itemize}
+  \item In my research I am working on applying Newton's method to compute the CP decomposition of tensors
+  \item The \textbf{batched tensor-times-vector} (batched TTV) is one of the most expensive operations in that algorithm
+  \item I was curious: \emph{how parallelizable is it?}
+  \item This class gave me the tools to find out
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{What is Batched TTV?}
+
+Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stored in column-major order:
+\[
+  \mathcal{X}(i,j,k) \;=\; \texttt{X[i + j*I + k*I*J]}
+\]
+
+\textbf{Tensor-times-vector (mode $m$):}
+contract one mode of $\mathcal{X}$ with a vector $\M{u}$, producing a matrix.
+
+\medskip
+
+\textbf{Batched:} repeat for a \emph{batch} of vectors packed along mode $n$.
+
+\medskip
+
+\textbf{Example --- contract mode 1, batch over mode 3:}
+\[
+  Y(j,k) = \sum_{i=1}^{I} \mathcal{X}(i,j,k) \cdot U(i,k)
+\]
+
+There are \textbf{six} $(m,n)$ pairings for a 3rd-order tensor.
+
+\end{frame}
+
+% ============================================================
+\begin{frame}[fragile]{Serial Implementation}
+
+Each case is a triple nested loop.
+The two outer loops index output elements; the inner loop is a dot product.
+
+\medskip
+
+\begin{columns}[T]
+\begin{column}{0.55\textwidth}
+\begin{algorithmic}[1]
+\small
+\For{$k = 0 \ldots K{-}1$}
+  \For{$j = 0 \ldots J{-}1$}
+    \State $s \gets 0$
+    \For{$i = 0 \ldots I{-}1$}
+      \State $s \mathrel{+}= X[i{+}jI{+}kIJ] \cdot U[i{+}kI]$
+    \EndFor
+    \State $Y[j{+}kJ] \gets s$
+  \EndFor
+\EndFor
+\end{algorithmic}
+\vspace{4pt}
+\centering\small Case $(m{=}1, n{=}3)$
+\end{column}
+\begin{column}{0.40\textwidth}
+\begin{itemize}\small
+  \item All six cases have the same structure
+  \item Only the index formulas change
+  \item $O(IJK)$ work for each case
+\end{itemize}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Memory Access Patterns Matter}
+
+$\mathcal{X}$ is column-major: \texttt{X[i + j*I + k*I*J]}.
+
+The \textbf{inner loop variable} determines the stride through memory:
+
+\medskip
+
+\begin{center}
+\begin{tabular}{cccc}
+\hline
+\textbf{Case} & \textbf{Inner var} & \textbf{Stride} & \textbf{Serial time (s)} \\
+\hline
+$m{=}1, n{=}3$ & $i$ & 1 & 3.3 \\
+$m{=}1, n{=}2$ & $i$ & 1 & 3.4 \\
+$m{=}2, n{=}3$ & $j$ & $I$ & 3.4 \\
+$m{=}3, n{=}2$ & $k$ & $IJ$ & 3.5 \\
+$m{=}2, n{=}1$ & $j$ & $I$ & 6.8 \\
+$m{=}3, n{=}1$ & $k$ & $IJ$ & 9.8 \\
+\hline
+\end{tabular}
+\end{center}
+
+\medskip
+
+Same number of FLOPs, but up to $3\times$ difference in wall time due to cache behavior.
+
+This pattern is well known and arises in the research context as well.
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Parallelization: OpenMP}
+
+The two outer loops are independent (each computes one output element).
+
+\medskip
+
+\begin{itemize}
+  \item \texttt{\#pragma omp parallel for collapse(2)}
+  \item Inner loop is a scalar reduction --- no atomics needed
+  \item Straightforward to apply to all six cases
+\end{itemize}
+
+\bigskip
+
+% [FIGURE: Thread scaling plot]
+% Suggested figure: X-axis = number of OMP threads (1, 2, 4, 8, 16, 32),
+% Y-axis = wall time (seconds). One line per case (or group the
+% cache-friendly cases vs cache-unfriendly). Show GPU time as a
+% horizontal dashed line for reference. Data: results_1000.csv, N=1000.
+\begin{center}
+  \Large\color{gray} [Thread scaling figure --- \texttt{results\_1000.csv}]
+\end{center}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Parallelization: CUDA}
+
+One thread per output element; the inner (contracted) dimension is a serial reduction.
+
+\medskip
+
+% [DIAGRAM: GPU thread/block mapping]
+% Suggested diagram: A 2D grid of blocks, each block is T x T threads.
+% One axis maps to one free index (e.g., j), the other to the second
+% free index (e.g., local_k). The contracted index (i) is the serial
+% loop inside each thread.
+\begin{center}
+  \Large\color{gray} [Diagram: thread $\to$ output element mapping]
+\end{center}
+
+\medskip
+
+\begin{itemize}
+  \item Block size: $32 \times 32$ threads
+  \item Grid: $\lceil D_1 / 32 \rceil \times \lceil D_2 / 32 \rceil$ blocks
+  \item Thread $(x,y)$ computes one dot product of length $D_3$
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Challenge: Fitting in GPU Memory}
+
+\textbf{First attempt:} generate random data on the GPU using \texttt{curandState\_t}.
+
+\medskip
+
+\begin{itemize}
+  \item Each \texttt{curandState\_t} is 48 bytes
+  \item For $I{=}J{=}K{=}1000$: need $10^9$ states $= 48$ GB
+  \item Our GPU has $\sim$8 GB of VRAM
+\end{itemize}
+
+\bigskip
+
+\textbf{Solution:} generate data on the CPU, write to a binary file, and load it.
+
+\begin{itemize}
+  \item All three implementations (Serial, OpenMP, CUDA) use the same file
+  \item Ensures identical input for fair comparison
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Challenge: Tensors Larger than VRAM}
+
+Even with CPU-generated data, $\mathcal{X}$ at $2000^3$ is 32 GB --- still too large.
+
+\bigskip
+
+\textbf{Solution:} tile over the $K$ dimension.
+
+\begin{enumerate}
+  \item Query free VRAM with \texttt{cudaMemGetInfo}
+  \item Compute how many $K$-slices fit (each slice is $I \times J$ floats)
+  \item Loop: copy a chunk to the GPU $\to$ launch kernel $\to$ repeat
+  \item One final \texttt{cudaMemcpy} for $Y$ back to host
+\end{enumerate}
+
+\medskip
+
+This works because $K$-slices are contiguous in memory (column-major layout).
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Results: OpenMP Thread Scaling ($N = 1000$)}
+
+% [FIGURE: Thread scaling at N=1000]
+% Suggested figure: grouped bar chart or line plot.
+% X-axis: thread count (Serial, 1, 2, 4, 8, 16, 32).
+% Y-axis: time (seconds), log scale recommended.
+% Group the six cases, or show two representative ones
+% (e.g., m1n3 as "cache-friendly" and m3n1 as "cache-unfriendly").
+% Data source: results_1000.csv
+\begin{center}
+  \Large\color{gray} [Thread scaling figure]
+\end{center}
+
+\bigskip
+
+\begin{itemize}
+  \item Cache-friendly cases ($m{=}1$): near-linear scaling up to 32 threads
+  \item Cache-unfriendly cases ($m{=}3, n{=}1$): limited by memory bandwidth
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Results: GPU vs.\ CPU Across Problem Sizes}
+
+% [FIGURE: Size sweep]
+% Suggested figure: line plot, one line per implementation.
+% X-axis: N (500, 750, 1000, 1250, 1500, 1750, 2000).
+% Y-axis: time (seconds), log scale recommended.
+% Lines: Serial, OpenMP-32, GPU.
+% Pick one representative case (e.g., m1n3 or m2n1), or
+% show total time across all six cases.
+% Data source: results from sweep.sh (once available)
+\begin{center}
+  \Large\color{gray} [Problem size sweep figure]
+\end{center}
+
+\bigskip
+
+\begin{itemize}
+  \item Work scales as $O(N^3)$; data scales as $O(N^3)$
+  \item GPU timing includes host $\leftrightarrow$ device transfers
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Results: Per-Case Comparison}
+
+% [FIGURE: Per-case breakdown]
+% Suggested figure: grouped bar chart.
+% X-axis: the six (m,n) cases.
+% Y-axis: time (seconds).
+% Bars: Serial, OMP-32, GPU (at a fixed N, e.g., 1000 or 2000).
+% This highlights how memory layout affects each implementation
+% differently.
+% Data source: results_1000.csv or results_2000.csv
+\begin{center}
+  \Large\color{gray} [Per-case comparison figure]
+\end{center}
+
+\bigskip
+
+\begin{itemize}
+  \item Memory layout affects all implementations, but to different degrees
+  \item GPU coalescing mirrors CPU cache locality --- stride-1 cases win everywhere
+\end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Conclusions}
+
+\begin{itemize}
+  \item Batched TTV is embarrassingly parallel --- maps naturally to GPU threads
+  \item GPU achieves significant speedup over serial and multi-core OpenMP
+  \item Memory access patterns (cache lines / coalescing) affect all implementations
+  \item $K$-chunking enables processing tensors larger than GPU memory
+\end{itemize}
+
+\bigskip
+
+\textbf{Code:} \texttt{github.com/WFUCSCCho/project-5-DuBose-Tuller}
+
+\end{frame}
+
+\end{document}
