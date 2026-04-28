@@ -105,7 +105,7 @@ def main():
     bar width=8pt,
     symbolic x coords={m1n3,m1n2,m2n3,m3n2,m2n1,m3n1},
     xtick=data,
-    xticklabels={{$m{=}1,\,n{=}3$},{$m{=}1,\,n{=}2$},{$m{=}2,\,n{=}3$},{$m{=}3,\,n{=}2$},{$m{=}2,\,n{=}1$},{$m{=}3,\,n{=}1$}},
+    xticklabels={{$(1,3)$},{$(1,2)$},{$(2,3)$},{$(3,2)$},{$(2,1)$},{$(3,1)$}},
     xlabel={Contraction case},
     ylabel={Speedup over serial},
     legend pos=north east,
@@ -161,11 +161,13 @@ def main():
 \begin{axis}[
     xmode=log, ymode=log,
     xlabel={Tensor mode size $n$ \, (cubic $n\times n\times n$)},
-    ylabel={Time (s)},
-    legend pos=north west,
+    ylabel={'Kernel' Time (s)},
+    legend pos=south east,
     width=0.9\linewidth,
     height=6.5cm,
     xmin=400, xmax=2500,
+    xtick={500,1000,1500,2000},
+    xticklabels={500,1000,1500,2000},
     ymajorgrids=true, xmajorgrids=true,
     unbounded coords=discard,
 ]
@@ -175,8 +177,6 @@ def main():
 \addlegendentry{OMP-32}
 \addplot[mark=o,blue,thick] table[x=n,y=ser] {fig/fig3.dat};
 \addlegendentry{Serial}
-\addplot[densely dashed,gray,no marks,thick] coordinates {(1260,0.01) (1260,200)};
-\node[gray,rotate=90,font=\small] at (axis cs:1120,0.07) {8\,GB VRAM limit};
 \end{axis}
 \end{tikzpicture}
 """)

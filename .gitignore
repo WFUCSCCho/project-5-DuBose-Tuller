@@ -12,3 +12,7 @@ venv/
 *.snm
 *.gz
 *.vrb
+*.aux
+*.toc
+*.out
+*.log
