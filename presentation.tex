@@ -181,21 +181,6 @@ Similar pattern to BLAS implementation in MATLAB.
 \end{frame}
 
 % ============================================================
-\begin{frame}{Parallelization: OpenMP}
-\begin{itemize}
-  \item The two outer loops are independent (each computes one output element).
-  \item However, poor spatial locality slows parallelism down
-\end{itemize}
-
-
-
-\begin{center}
-\resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
-\end{center}
-
-\end{frame}
-
-% ============================================================
 \begin{frame}{Parallelization: CUDA}
 
 One thread per output element; the inner (contracted) dimension is a serial reduction.
@@ -263,12 +248,13 @@ Even with CPU-generated data, $\mathcal{X}$ at $2000^3$ is about 30 GB.
 
 Instead, we tile over the $K$ dimension.
 
-\begin{enumerate}
+\begin{itemize}
   \item Query free VRAM with \texttt{cudaMemGetInfo}
   \item Compute how many $K$-slices fit (each slice is $I \times J$ floats)
   \item Loop: copy a chunk to the GPU $\to$ launch kernel $\to$ repeat
+  \item When $K$ is the contracted mode, each call computes a portion of the required entry.
   \item One final \texttt{cudaMemcpy} for $Y$ back to host
-\end{enumerate}
+\end{itemize}
 
 \medskip
 
@@ -300,6 +286,21 @@ This works because $K$-slices are contiguous in memory (column-major layout).
   \item $K$-chunking enables processing tensors larger than GPU memory
   \item Most of the time is still not spent in the `kernel'
 \end{itemize}
+
+\end{frame}
+
+% ============================================================
+\begin{frame}{Extras: OpenMP attempt}
+\begin{itemize}
+  \item Poor spatial locality slows parallelism down!
+  \item `Unrefined' implementation
+\end{itemize}
+
+
+
+\begin{center}
+\resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
+\end{center}
 
 \end{frame}
 
