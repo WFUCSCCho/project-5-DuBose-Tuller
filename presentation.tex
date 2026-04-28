@@ -76,8 +76,11 @@
 \begin{itemize}
   \item Personal research: applying Newton's method to compute the CP decomposition of tensors
   \item The \textbf{batched tensor-times-vector} operation is one of the most expensive in that algorithm
-  \item Simple arithmetic: the problem is scale
 \end{itemize}
+
+\begin{center}
+  \includegraphics[width=0.7\linewidth]{TTM}
+\end{center}
 
 \end{frame}
 
@@ -89,12 +92,12 @@ Given a 3rd-order tensor $\mathcal{X} \in \mathbb{R}^{I \times J \times K}$ stor
   \mathcal{X}(i,j,k) \;=\; \texttt{X[i + j*I + k*I*J]}
 \]
 
-\textbf{Tensor-times-vector (mode $m$):}
-contract one mode of $\mathcal{X}$ with a vector $\M{u}$, producing a matrix.
+\textbf{Batched Matrix-Vector product:}
+contract one mode of $\mathcal{X}$ with a vector $\M{u}$, producing a vector. Repeat for each vector in a matrix.
 
 \medskip
 
-This operation is equivalent to multiple independent matrix-vector products.
+This operation is equivalent to multiple independent vector-vector products.
 
 \medskip
 
