@@ -177,8 +177,12 @@ Similar pattern to BLAS implementation in MATLAB.
 
 % ============================================================
 \begin{frame}{Parallelization: OpenMP}
+\begin{itemize}
+  \item The two outer loops are independent (each computes one output element).
+  \item However, poor spatial locality slows parallelism down
+\end{itemize}
 
-The two outer loops are independent (each computes one output element).
+
 
 \begin{center}
 \resizebox{0.95\linewidth}{!}{\input{fig/fig2}}
@@ -193,21 +197,16 @@ One thread per output element; the inner (contracted) dimension is a serial redu
 
 \medskip
 
-% [DIAGRAM: GPU thread/block mapping]
-% Suggested diagram: A 2D grid of blocks, each block is T x T threads.
-% One axis maps to one free index (e.g., j), the other to the second
-% free index (e.g., local_k). The contracted index (i) is the serial
-% loop inside each thread.
 \begin{center}
-  \Large\color{gray} [Diagram: thread $\to$ output element mapping]
+\resizebox{0.95\linewidth}{!}{\input{fig/fig_cuda}}
 \end{center}
 
 \medskip
 
 \begin{itemize}
   \item Block size: $32 \times 32$ threads
-  \item Grid: $\lceil D_1 / 32 \rceil \times \lceil D_2 / 32 \rceil$ blocks
-  \item Thread $(x,y)$ computes one dot product of length $D_3$
+  \item Thread $(x,y)$ computes one dot product
+  \item Length is equal to contract mode dimension
 \end{itemize}
 
 \end{frame}
@@ -280,8 +279,8 @@ This works because $K$-slices are contiguous in memory (column-major layout).
 \end{center}
 
 \begin{itemize}
-  \item Showing case $(m{=}2, n{=}1)$; GPU timing includes H2D/D2H transfers
-  \item GPU uses $K$-chunking beyond the 8\,GB VRAM limit (dashed line)
+  \item Showing case $(m{=}2, n{=}1)$
+  \item GPU uses chunking beyond 8\,GB VRAM limit ($n\geq 1500$)
 \end{itemize}
 
 \end{frame}
@@ -294,11 +293,8 @@ This works because $K$-slices are contiguous in memory (column-major layout).
   \item GPU achieves significant speedup over serial and multi-core OpenMP
   \item Memory access patterns (cache lines / coalescing) affect all implementations
   \item $K$-chunking enables processing tensors larger than GPU memory
+  \item Most of the time is still not spent in the `kernel'
 \end{itemize}
-
-\bigskip
-
-\textbf{Code:} \texttt{github.com/WFUCSCCho/project-5-DuBose-Tuller}
 
 \end{frame}
 
