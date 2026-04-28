@@ -1,4 +1,4 @@
-% ── Figure 3: Size scaling for case (m=2,n=1), log-log ──────
+% ── Figure 3: Size scaling for case (m=3,n=1), log-log ──────
 % Requires: \usepackage{pgfplots}  \pgfplotsset{compat=1.18}
 % Vertical line marks the 8 GB VRAM limit: n^3*4 bytes = 8 GB -> n~1260
 \begin{tikzpicture}
@@ -17,7 +17,7 @@
 ]
 \addplot[mark=triangle*,green!60!black,thick] table[x=n,y=gpu] {fig/fig3.dat};
 \addlegendentry{GPU}
-\addplot[mark=square*,orange!80!black,thick] table[x=n,y=omp] {fig/fig3.dat};
+% \addplot[mark=square*,orange!80!black,thick] table[x=n,y=omp] {fig/fig3.dat};
 \addlegendentry{OMP-32}
 \addplot[mark=o,blue,thick] table[x=n,y=ser] {fig/fig3.dat};
 \addlegendentry{Serial}

@@ -57,7 +57,7 @@ def main():
     threads = [1, 2, 4, 8, 16, 32]
     sizes   = [500, 750, 1000, 1250, 1500, 1750, 2000]
     n0 = 1000
-    c3 = 'm2n1'
+    c3 = 'm3n1'
 
     # ── Figure 1: speedup over serial, all cases at n=1000 ───────────
     rows1 = []
@@ -84,7 +84,7 @@ def main():
     write_table(os.path.join(fig_dir, 'fig2.dat'),
                 ['threads', 'm1n3', 'm3n1'], rows2)
 
-    # ── Figure 3: size scaling for case (m=2, n=1) ───────────────────
+    # ── Figure 3: size scaling for case (m=3, n=1) ───────────────────
     rows3 = []
     for n in sizes:
         rows3.append((n,
@@ -154,7 +154,7 @@ def main():
 
     # Figure 3 --------------------------------------------------------
     with open(os.path.join(fig_dir, 'fig3.tex'), 'w') as f:
-        f.write(r"""% ── Figure 3: Size scaling for case (m=2,n=1), log-log ──────
+        f.write(r"""% ── Figure 3: Size scaling for case (m=3,n=1), log-log ──────
 % Requires: \usepackage{pgfplots}  \pgfplotsset{compat=1.18}
 % Vertical line marks the 8 GB VRAM limit: n^3*4 bytes = 8 GB -> n~1260
 \begin{tikzpicture}
