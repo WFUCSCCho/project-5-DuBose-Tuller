@@ -1,0 +1,704 @@
+ @README.md This is a project description for my GPU programming class. I am personally interested in parallelizing the code for computing a        
+  batched matrix vector product @../../../Documents/MATLAB/tensors/cp-newton/matlab/batched_ttv.c for my research. I think the 'serial' version      
+  should just use more naive mat vec / dot products instead of casting to BLAS calls for simplicity of the project. We also need to remove the MEX   
+  interface and just have it be a C program in the style of @../project-2-part-1-DuBose-Tuller/MatrixMult.c so that it can be more easily cast to    
+  CUDA. Does this idea fit the requirements of the project in your opinion?
+
+
+Yes, this fits the requirements well. Here's my assessment:           
+                               
+  Strengths of this approach:
+                                                                                                                                           
+  - Problem fit: Batched tensor-times-vector (TTV) is mathematically simple (just batched mat-vec / dot products), fully controllable by tensor
+  dimensions I, J, K, and will show clear GPU speedup — exactly what's asked for.
+  - Serial simplification is correct: Replacing BLAS calls with naive triple loops (like the multiplyMatrices style in MatrixMult.c) makes the serial
+   version pedagogically transparent and a fair baseline.
+  - MEX removal is natural: The MEX interface is just a MATLAB wrapper. Stripping it down to a standalone main() with command-line dimension
+  arguments (like ./batched_ttv I J K) is a clean transformation.
+  - Scientific motivation is real: You have a genuine research use case (CP decomposition / tensor methods), which satisfies the "Why" slide in the
+  presentation.
+
+  Things to plan for to satisfy all requirements:
+
+  - Performance optimization beyond naive: The naive CUDA port would be one kernel per batch element. For the optimization, shared memory tiling of
+  the inner mat-vec loop is the natural choice — or using coalesced memory access since the current batched_ttv.c has different memory strides per
+  case (m, n combination), which gives you something interesting to discuss.
+  - Benchmark across problem sizes: Sweep over tensor dimensions (e.g., vary I from 64 to 4096) to generate your performance graph.
+  - Pick a subset of the (m, n) cases: The current code handles 6 cases. For the project, you could focus on one or two (e.g., m=1, n=3 and m=2, n=3)
+   to keep scope manageable.
+
+  One potential risk: The 6 different memory-layout cases in batched_ttv.c each require a different CUDA kernel or branching logic. I'd recommend
+  scoping to 1-2 cases for the project and noting the others as future work.
+
+  Overall: solid choice.
+
+Can you perform the MEX to plain C port please? Let's start with all six cases and then later I will focus on parallelizing them one at a time
+
+
+
+Can you help me fix up @parallel/batched_ttv.cu ? We are doing one case of @serial/batched_ttv.c . I adapted the GPU code from a square matrix     
+  multiplication example I already had. One TODO I already know about it that I need to multiply the *transpose* of each X slice by the column of U, 
+   but I am sure there are more.                                                                                                                     
+  ⎿  Read parallel/batched_ttv.cu (174 lines)                                                                                                        
+  ⎿  Read serial/batched_ttv.c (236 lines)                                                                                                           
+                                                                                                                                                     
+⏺ Looking at both files, I can see multiple bugs beyond the transpose TODO. Let me enumerate them all before fixing:                                 
+                                                                                                                                                     
+  1. Missing #include <curand_kernel.h> — curandState_t won't be found                                                                               
+  2. Kernel bttv_m_2_n_1: threadIdx.i doesn't exist (missing semicolon too), I/J/K are passed as int* but used as values, and the body is a stub   
+  3. The transpose TODO: the formula Y[k+i*K] = sum_j X[i+j*I+k*I*J] * U[j+i*J] is already the correct math — no separate matrix multiply needed,    
+  just one dot product per output element                                                                                                          
+  4. main line 108: int J = strtol(argv[3]...) — duplicate J, should be K                                                                            
+  5. main line 109: printf references undefined n                                                                                                  
+  6. main lines 115, 123–125, 168–173: A/B/C and dev_A/dev_B/dev_C should be X/U/Y and dev_X/dev_U/dev_Y                                             
+  7. main line 126: dev_states sized n*n should be I*J*K
+  8. main line 142: copies uninitialized Y host→device before the kernel (unnecessary/wrong direction)
+  9. Timing: stop event is recorded after the D2H memcpy — should be right after the kernel
+  10. main line 163: sec undefined (use milliseconds/1000.0f), csv FILE pointer name mismatch with result
+  11. Grid dims: the bttv kernel works over (K, I), not the full 3D tensor
+
+
+Can we talk through the ideas one by one instead of overwriting the whole thing?                                            
+                                                                                   
+⏺ Absolutely. Let me start with the most fundamental one — the kernel itself.                                                 
+                                                                                                                            
+  The key insight is that you don't actually need multiplyMatrices at all. The math for case (m=2, n=1) is:                   
+  
+  Y[k + i*K] = sum_j  X[i + j*I + k*I*J] * U[j + i*J]                                                                         
+                                                                                                                              
+  That's just a dot product — for each output element (k, i), you walk over j and accumulate. So the natural GPU parallelism  
+  is: one thread per (k, i) pair, with a serial loop over j. No matrix multiply kernel needed.                                
+                                                                                                                              
+  The "transpose" you were thinking about is already baked into the index formula — X[i + j*I + k*I*J] with i fixed is        
+  stepping through the tensor in a way that corresponds to reading the transpose of a slice.
+                                                                                                                              
+  Does that match your mental model, or did you have a different approach in mind (e.g., using shared memory tiling via       
+  multiplyMatrices)?
+                                                                                                                              
+❯ That's a good point. I have updated the structure to reflect that.                                                          
+                                                                                                                            
+⏺ Let me see the current state of the file.                                                                                   
+                                                                                                                            
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Good progress — the structure is right. Let me walk through the remaining issues in order of importance.                    
+                                                                                                                            
+  Next up: the kernel body (lines 77–81). The ?? placeholders are just the index formulas from the serial code, directly      
+  translated:                                                                                                                 
+                                                                                                                              
+  sum += X[i + j*I + k*I*J] * U[j + i*J];                                                                                     
+  // ...                                                                                                                      
+  Y[k + i*K] = sum;
+                                                                                                                              
+  Also two other issues in the kernel:                                                                                        
+  1. Line 77: for (int j = 0, j < J, ++j) — commas should be semicolons
+  2. Lines 73–74: k = threadIdx.x and i = threadIdx.y — these only work for a single block. You need blockIdx too: k =        
+  blockIdx.x * blockDim.x + threadIdx.x                                                                                     
+                                                                                                                              
+  Want to fix those, then we'll move on to the main bugs?                                                                   
+                                                                                                                              
+❯ Done                                                                                                                        
+                                                                                                                              
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Kernel looks correct. Moving to main — let's take the compile errors first since they'll block everything else.             
+                                                                                                                              
+  Lines 95–96: Two issues:                                                                                                    
+  - int J = strtol(argv[3]...) — second declaration of J, should be int K                                                     
+  - printf("... n = %d\n", n) — n is never defined; you probably want something like "I=%d J=%d K=%d\n", I, J, K              
+                                                                                                                              
+  Want to fix those two, then we'll tackle the cudaMalloc variable name mismatches?                                           
+                                                                                                                              
+❯ done
+
+
+Did all 3. I am not curious about what to do for the states? I don't really understand how those work. Especially since the 
+   two things we are randomizing have different sizes                                                                         
+                                                                                                                              
+⏺ Good question. Here's the mental model:                                                                                     
+                                                                                                                              
+  Each curandState_t is one independent RNG. curand_init(seed, sequence, offset, &state) sets up a unique RNG sequence for    
+  that state — the sequence number (which you set to the array index idx) is what makes each state independent from the       
+  others. Then curand_uniform advances that state and returns one float.                                                      
+                                                                                                                              
+  For your two arrays: X needs I*J*K random numbers, U needs J*I. The simplest approach is to allocate I*J*K states (enough   
+  for X), then reuse a subset of them for U.
+                                                                                                                              
+  The generateRandomNumbers call for U already does this — it passes (J, I, 1) as dimensions, so the kernel computes idx = j +
+   i*J, which only touches states at indices [0, I*J-1]. Those are all within the I*J*K allocation.
+                                                                                                                              
+  The one subtlety: those states were already advanced once (to fill X's first slice), so U gets the second number from each  
+  of those sequences rather than the first. For a benchmark this is completely fine — the values are still pseudo-random.
+                                                                                                                              
+  So the fix for line 113 is just:                                                                                            
+  CHECK_CUDA(cudaMalloc(&dev_states, (long)I*J*K*sizeof(curandState_t)));
+                                                                                                                              
+  The (long) cast avoids integer overflow if I, J, K are large. Does that make sense?                                         
+                                                                                                                              
+❯ Yes, anything else?                                                                                                         
+                                                                                                                              
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)                                             
+  ⎿  Read 161 lines                                                                                                           
+                                                                                                                              
+⏺ Good progress. A few more remaining:                                                                                        
+                                                                                                                              
+  Compile errors (easy fixes):                                                                                                
+  - Line 102: A/B/C → X/U/Y                                                                                                   
+  - Lines 155–160: dev_A/dev_B/dev_C and A/B/C → dev_X/dev_U/dev_Y and X/U/Y                                                  
+  - Line 150: csv → result, and sec → milliseconds / 1000.0f                                                                  
+                                                                                                                              
+  Silent bug — the grid for setup/generate (line 115): dimGrid is 2D, but setup_kernel and generateRandomNumbers use          
+  threadIdx.z + blockIdx.z * blockDim.z to compute slc. With a 2D grid, blockIdx.z is always 0 and threadIdx.z is always 0, so
+   slc is always 0 — only the first K-slice of X gets filled with random numbers, the rest are uninitialized. You need a      
+  separate 3D grid for those two kernels:                                                                                     
+  dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1);                                                                     
+  and use that for setup_kernel and generateRandomNumbers, keeping the 2D dimGrid for bttv_m_2_n_1.
+                                                                                                                              
+  Timing bug (lines 128–137): cudaEventRecord(stop) is called after the D2H memcpy, so you're timing the kernel + synchronize 
+  + memcpy. Move stop to right after the kernel launch (CUDA events are queued on the GPU timeline, so it'll naturally record 
+  when the kernel finishes):                                                                                                  
+  bttv_m_2_n_1<<<dimGrid, dimBlock>>>(...);                                                                                   
+  CHECK_CUDA(cudaEventRecord(stop));                                                                                        
+  CHECK_CUDA(cudaEventSynchronize(stop));
+  // then do the memcpy                  
+  Also remove line 129 entirely — copying uninitialized Y host→device before the kernel is pointless.                         
+                                                                                                     
+  Want to work through those in order?
+
+
+It compiles now, but only the first column of the result (10x10x10) is nonzero. What could that mean?                       
+                                                                                                                              
+⏺ That's exactly the 3D grid bug I mentioned. The dimGrid is 2D, so blockIdx.z is always 0, meaning slc is always 0 in both   
+  setup_kernel and generateRandomNumbers. Only the k=0 slice of X gets filled with random numbers — the rest is effectively 0,
+   so all the dot products for k>0 come out zero.
+                                                                                                                              
+  The fix: use a separate 3D grid for setup and generation, then keep the 2D grid for the bttv kernel:                        
+                                                                                                                              
+  dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1);                                                                       
+  dim3 dimGrid((K / T) + 1, (I / T) + 1);                                                                                     
+  dim3 dimBlock(T, T);
+  // ...                                                                                                                      
+  setup_kernel<<<dimGrid3, dimBlock>>>(...);                                                                                
+  generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_X, I, J, K);                                                  
+  generateRandomNumbers<<<dimGrid3, dimBlock>>>(dev_states, dev_U, J, I, 1);                                                  
+  // ...                                                                                                                      
+  bttv_m_2_n_1<<<dimGrid, dimBlock>>>(...);
+
+❯ @parallel/batched_ttv.cu currently works for the m=2, n=1 case as expected. However, when the problem size is too large     
+  (larger than the GPU memory) there is an allocation error. What is the best way to handle problem sizes that are larger     
+  than the GPU's memory? For this particular project, we are just generating random entries on the fly. I can do problems of  
+  1000 x 1000 x 100, but not 1000 x 1000 x 1000 (I beleive we have 8GB of VRAM total if that helps).                          
+  ⎿  Read parallel/batched_ttv.cu (161 lines)
+
+⏺ Looking at the memory usage:
+  - dev_X: I×J×K floats → 1000³ × 4B = 4 GB
+  - dev_states: I×J×K curandState_t → 1000³ × 48B = 48 GB (the real culprit)
+
+  Since you're generating random data purely for testing, the best approach is on-the-fly generation — eliminate X entirely by
+   having each compute thread generate its own random values inline using a per-thread curandState_t. Memory drops to just U
+  (4 MB) + Y (4 MB).
+
+  The tradeoff is that curand_init adds overhead per thread, but for J=1000 it's amortized over 1000 multiply-accumulates, so
+  it should be acceptable. Let me implement this:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Tool use rejected
+
+⏺ That's a fair point — if X needs to be consistent across multiple operations (e.g., loaded from a file), on-the-fly
+  generation per-compute-thread won't work.
+
+  The real answer is tiling over K, combined with moving X generation to the CPU (or a file). Here's the memory breakdown of
+  why it breaks:
+
+  ┌──────────────┬────────────────────────────────────────┐
+  │    Array     │              Size (1000³)              │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_states   │ 1000³ × 48B = 48 GB (the main culprit) │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_X        │ 1000³ × 4B = 4 GB                      │
+  ├──────────────┼────────────────────────────────────────┤
+  │ dev_U, dev_Y │ ~4 MB each (negligible)                │
+  └──────────────┴────────────────────────────────────────┘
+
+  The fix: generate X on the CPU (representative of a real disk-load) and process X in K-tiles that fit in VRAM. No states
+  array on the GPU at all.
+
+  For I=J=K=1000 with tile_K=200:
+    X tile on GPU: 1000 × 1000 × 200 × 4B = 800 MB  ✓
+    U:             1000 × 1000 × 4B        = 4 MB    ✓
+    Y:             1000 × 1000 × 4B        = 4 MB    ✓
+
+  The loop structure becomes:
+  cpu_X = rand_fill(I*J*K)           // on host RAM
+  for k_start in range(0, K, tile_K):
+      cudaMemcpy(dev_X_tile, cpu_X + k_start*I*J, tile_K*I*J)
+      bttv_kernel<<<...>>>(dev_X_tile, dev_U, dev_Y_tile, I, J, tile_K)
+      cudaMemcpy(Y + k_start*I, dev_Y_tile, tile_K*I)
+
+  You can also overlap the next tile's cudaMemcpy with the current tile's kernel execution using CUDA streams and pinned
+  (page-locked) host memory for better throughput.
+
+  Want me to implement this tiling version? I'd also need to pick a tile_K — either hardcoded, auto-computed from a memory
+  budget, or passed as a CLI argument.
+
+✻ Worked for 2m 6s
+
+❯ Hmm this is making me question the validity of this project. The point is to demonstrate an algorithm that GPUs can speed   
+  up @README.md The problem is that, in my understanding, its not like the GPU threads can read from disk directly, and the   
+  dot products likely take much less time that the syscalls. I was hoping to achieve scale large than what can fit on a       
+  single CPUs reasonable memory, but perhaps that does not make sense for this project. What I worry about for the batched    
+  ttv is that the cost will be dominated by loading X anyway, but maybe that's ok if the GPU cost still achives significant   
+  speedup over the serial implementation. Thoughts?                                                                           
+  ⎿  Read README.md (82 lines)
+
+⏺ Your concern is valid but I think the framing resolves it. Let me walk through the arithmetic:
+
+  What the benchmark actually measures
+
+  X is generated in GPU VRAM (not loaded from disk). So the relevant comparison is:
+  - Serial CPU: reads X from DDR4 RAM (~50 GB/s bandwidth)
+  - Parallel GPU: reads X from GPU VRAM (~500-900 GB/s bandwidth)
+
+  Disk I/O never enters the picture. The speedup comes from memory bandwidth, not compute.
+
+  This algorithm is memory-bandwidth-bound — which is fine
+
+  Arithmetic intensity for one output element Y[k,i]:
+  - Load J floats from X, J floats from U → ~8J bytes
+  - Do 2J FLOPs (multiply-accumulate)
+  - AI ≈ 0.25 FLOP/byte
+
+  Low AI means it's bandwidth-bound, but GPU bandwidth advantage over CPU RAM is 10-20x. That's a real and meaningful speedup.
+   "Memory-bandwidth-bound operations benefit from GPU's high-bandwidth memory" is a perfectly valid HPC story.
+
+  What this means for scope
+
+  Scaling beyond VRAM doesn't make sense for this project — once you're streaming through PCIe (~16 GB/s), you're slower than
+  CPU RAM. The interesting regime is entirely within VRAM. Your 1000×1000×100 case works; just benchmark a sweep of sizes that
+   fit (e.g., varying K from 10 to 100, varying I/J from 100 to 1000) and show the speedup curve.
+
+  One flag worth knowing
+
+  The current kernel likely has poor memory coalescing: consecutive threads (varying k, your x-dim) access X[i + j*I + k*I*J]
+  with stride I*J between them — that's up to 4MB between adjacent threads in a warp, which will hurt measured throughput
+  significantly. This might be worth fixing before benchmarking if you want results that reflect the algorithm's true
+  potential rather than the coalescing penalty.
+
+  The project is fine — you just don't need to scale beyond VRAM.
+
+✻ Cooked for 53s
+
+※ recap: Working on a CUDA batched tensor-times-vector (BTTV) implementation for a GPU vs CPU benchmarking project. The
+  immediate next step is fixing the memory coalescing issue in the kernel before running benchmarks. (disable recaps in
+  /config)
+
+❯ Well, as the README says, there needs to be a 5-10 page technical report. I think having multiple                           
+  experiments/configurations will be useful, I would be interested personally to know how it compares to using multiple CPUs, 
+   which we do have access to on this cluster. Let's keep them in separate files and allow for clean comparison. I think we   
+  should pick a consistent data loading mechanism/location for all too. But first, let's fix the memory coalescing issue.
+
+⏺ Let me read the file again to make sure I have the current state before editing.
+
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Unchanged since last read
+
+⏺ The fix involves two changes: swap which thread dimension maps to i vs k (so consecutive threads in a warp access
+  consecutive i values, giving stride-1 reads of X[i + j*I + k*I*J]), and update dimGrid and Y indexing to match.
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 6 lines, removed 6 lines
+      70   * U layout: J x I  (column i holds the vector for batch element i)
+      71   * ------------------------------------------------------------------ */
+      72  __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
+      73 -    int k = threadIdx.x + blockIdx.x * blockDim.x;                                                           
+      74 -    int i = threadIdx.y + blockIdx.y * blockDim.y;                                                           
+      75 -    if (k < K && i < I) {                                                                                    
+      73 +    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1 (coalesced)                
+      74 +    int i = threadIdx.x + blockIdx.x * blockDim.x;                                                           
+      75 +    int k = threadIdx.y + blockIdx.y * blockDim.y;                                                           
+      76 +    if (i < I && k < K) {                                                                                    
+      77          float sum = 0;
+      78          for (int j = 0; j < J; ++j) {
+      79              sum += X[i + j*I + k*I*J] * U[j + i*J];
+      80          }
+      80 -                                                                                                             
+      81 -        Y[k + i*K] = sum;                                                                                    
+      81 +        // Y stored as I×K so writes are also stride-1 coalesced                                             
+      82 +        Y[i + k*I] = sum;                                                                                    
+      83      }
+      83 -                                                                                                             
+      84  }
+      85  
+      86  
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 1 line
+      113      CHECK_CUDA(cudaMalloc(&dev_states, (long) I * J * K * sizeof(curandState_t)));
+      114  
+      115      dim3 dimGrid3((J / T) + 1, (I / T) + 1, (K / T) + 1); // For X init
+      116 -    dim3 dimGrid((K / T) + 1, (I / T) + 1);                                                                 
+      116 +    dim3 dimGrid((I / T) + 1, (K / T) + 1);                                                                 
+      117      dim3 dimBlock(T,T);
+      118  
+      119      cudaEvent_t start, stop;
+
+⏺ Now fix the writeMatrix and cudaMemcpy calls since Y is now I×K instead of K×I:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Tool use rejected
+
+⏺ Good catch. The Y write is 1 write per output element (not in a loop), so the performance impact is much smaller than the X
+  reads which happen J times per element. Permuting Y could also require an explicit transpose downstream in an MTTKRP chain,
+  which costs a full extra memory pass — likely worse than the non-coalesced write.
+
+  I need to revert the Y[i + k*I] change I already made in the kernel since the downstream write call was left as K, I. Let me
+   fix that:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 2 lines
+      78          for (int j = 0; j < J; ++j) {
+      79              sum += X[i + j*I + k*I*J] * U[j + i*J];
+      80          }
+      81 -        // Y stored as I×K so writes are also stride-1 coalesced                                             
+      82 -        Y[i + k*I] = sum;                                                                                    
+      81 +        Y[k + i*K] = sum;                                                                                    
+      82      }
+      83  }
+      84  
+
+⏺ Also remove the stale comment from the kernel signature:
+
+⏺ Update(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu)
+  ⎿  Added 1 line, removed 1 line
+      70   * U layout: J x I  (column i holds the vector for batch element i)
+      71   * ------------------------------------------------------------------ */
+      72  __global__ void bttv_m_2_n_1(float *X, float *U, float *Y, int I, int J, int K) {
+      73 -    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1 (coalesced)                
+      73 +    // threadIdx.x → i: consecutive threads read X[i + j*I + k*I*J] with stride 1                            
+      74      int i = threadIdx.x + blockIdx.x * blockDim.x;
+      75      int k = threadIdx.y + blockIdx.y * blockDim.y;
+      76      if (i < I && k < K) {
+
+⏺ The coalescing fix is now correct and minimal: the dominant X reads are coalesced (J reads per element, stride 1), and Y
+  layout is left untouched (K×I, 1 write per element — not worth permuting). Let me verify the final state:
+
+⏺ Read(/Users/dubose/Desktop/647/project-5-DuBose-Tuller/parallel/batched_ttv.cu · lines 67-96)
+  ⎿  Read 30 lines
+
+⏺ Good. The coalescing fix is clean — threadIdx.x → i so the inner-loop X reads hit consecutive memory addresses. The Y write
+  stays K×I, so no permutation cost downstream.
+
+  To summarize what changed and what's still non-coalesced:
+  - X reads (fixed): stride 1 — fixed the dominant access, J reads per output element
+  - Y writes (intentionally left): stride K — 1 write per output element, not worth the permutation overhead
+  - U reads (cached): stride J — U is only J×I (~4 MB for 1000²), stays in L2 cache across all K iterations
+
+  Ready to discuss the data loading strategy and the multi-experiment structure whenever you are.
+
+⏺ Good picture now. Here's the plan:
+
+  - generate/: new standalone binary that writes a fixed-seed X and U to a .bin file (header: I,J,K; then X and U as float
+  arrays)
+  - serial/batched_ttv.c: reads from the bin file, switch double→float, bump -O0 to -O2
+  - parallel/batched_ttv_omp.c: new file — same 6 cases as serial but with #pragma omp parallel for collapse(2), reads same
+  bin file
+  - parallel/batched_ttv.cu: drop curand generation, read from bin file, cudaMemcpy to device
+  - Makefiles updated throughout; .gitignore gets data/
+
+  Writing all files now.
+
+  ⏺ Good. Here's the full workflow now:
+
+  # 1. Generate data once (example: 500×500×100, ~96 MB)
+  cd generate && make && ./generate 500 500 100 ../data/tensor_500_500_100.bin
+
+  # 2. Run all three on the same file
+  ./serial/batched_ttv    ../data/tensor_500_500_100.bin
+  OMP_NUM_THREADS=16 ./parallel/batched_ttv_omp ../data/tensor_500_500_100.bin
+  ./parallel/batched_ttv  ../data/tensor_500_500_100.bin
+
+  All three append to results.csv with the format Type,case,I,J,K,seconds. A few things to note:
+
+  - Serial and OpenMP run all 6 cases; GPU runs only m=2,n=1 (you can extend later)
+  - Timing excludes I/O — data is loaded before the clock starts in all three variants
+  - OpenMP label encodes thread count (OpenMP-16 etc.) so you can sweep thread counts for a scaling plot
+  - The omp.h IDE warning is expected on your Mac — it will resolve on the cluster where GCC+OpenMP is available
+
+❯ can you help me understand the results of the results from running benchmark.sh? They are                                   
+  Serial,m1n3,1000,1000,1000,3.336738                                                                                         
+  Serial,m1n2,1000,1000,1000,3.357603                                                                                         
+  Serial,m2n3,1000,1000,1000,3.367251                                                                                         
+  Serial,m3n2,1000,1000,1000,3.485104                                                                                         
+  Serial,m2n1,1000,1000,1000,6.816145                                                                                         
+  Serial,m3n1,1000,1000,1000,9.814947                                                                                         
+  Serial,m1n3,1000,1000,1000,3.336937                                                                                         
+  Serial,m1n2,1000,1000,1000,3.352237                                                                                         
+  Serial,m2n3,1000,1000,1000,3.362666                                                                                         
+  Serial,m3n2,1000,1000,1000,3.481674                                                                                         
+  Serial,m2n1,1000,1000,1000,6.843480                                                                                         
+  Serial,m3n1,1000,1000,1000,9.824618                                                                                         
+  OpenMP-1,m1n3,1000,1000,1000,3.356879                                                                                       
+  OpenMP-1,m1n2,1000,1000,1000,3.375670                                                                                       
+  OpenMP-1,m2n3,1000,1000,1000,3.396094                                                                                       
+  OpenMP-1,m3n2,1000,1000,1000,3.523682                                                                                       
+  OpenMP-1,m2n1,1000,1000,1000,6.645110                                                                                       
+  OpenMP-1,m3n1,1000,1000,1000,9.934510                                                                                       
+  OpenMP-2,m1n3,1000,1000,1000,1.676066                                                                                       
+  OpenMP-2,m1n2,1000,1000,1000,1.686750                                                                                       
+  OpenMP-2,m2n3,1000,1000,1000,1.705546                                                                                       
+  OpenMP-2,m3n2,1000,1000,1000,1.762234                                                                                       
+  OpenMP-2,m2n1,1000,1000,1000,5.097714                                                                                       
+  OpenMP-2,m3n1,1000,1000,1000,6.807754                                                                                       
+  OpenMP-4,m1n3,1000,1000,1000,0.842353                                                                                       
+  OpenMP-4,m1n2,1000,1000,1000,0.849997                                                                                       
+  OpenMP-4,m2n3,1000,1000,1000,0.877485                                                                                       
+  OpenMP-4,m3n2,1000,1000,1000,0.891385                                                                                       
+  OpenMP-4,m2n1,1000,1000,1000,5.619736                                                                                       
+  OpenMP-4,m3n1,1000,1000,1000,4.552023                                                                                       
+  OpenMP-8,m1n3,1000,1000,1000,0.423909                                                                                       
+  OpenMP-8,m1n2,1000,1000,1000,0.433951                                                                                       
+  OpenMP-8,m2n3,1000,1000,1000,0.451303                                                                                       
+  OpenMP-8,m3n2,1000,1000,1000,0.454382                                                                                       
+  OpenMP-8,m2n1,1000,1000,1000,3.314053                                                                                       
+  OpenMP-8,m3n1,1000,1000,1000,4.311058                                                                                       
+  OpenMP-16,m1n3,1000,1000,1000,0.217994                                                                                      
+  OpenMP-16,m1n2,1000,1000,1000,0.229770                                                                                      
+  OpenMP-16,m2n3,1000,1000,1000,0.288706                                                                                      
+  OpenMP-16,m3n2,1000,1000,1000,0.288282                                                                                      
+  OpenMP-16,m2n1,1000,1000,1000,2.744561                                                                                      
+  OpenMP-16,m3n1,1000,1000,1000,2.709995                                                                                      
+  OpenMP-32,m1n3,1000,1000,1000,0.130317                                                                                      
+  OpenMP-32,m1n2,1000,1000,1000,0.147855                                                                                      
+  OpenMP-32,m2n3,1000,1000,1000,0.157340                                                                                      
+  OpenMP-32,m3n2,1000,1000,1000,0.161568                                                                                      
+  OpenMP-32,m2n1,1000,1000,1000,2.535060                                                                                      
+  OpenMP-32,m3n1,1000,1000,1000,2.954077                                                                                      
+  GPU,m2n1,1000,1000,1000,0.019307                                                                                            
+   The GPU is still much faster than OpenMP. Is this because the problem size still fits on a GPU? I scaled from 1k to 2k (up 
+   8x) and now it is so slow that I can't tell if it's working anymore                                                        
+
+⏺ Let me look at the code to understand what's being benchmarked.
+
+⏺ Now I have a complete picture. Let me break down what you're seeing.    
+                                                                                           
+  The result format is Implementation, Case(mMnN), I, J, K, Time(seconds).                                                    
+                                                                                                                              
+  ---                                                                                                                         
+  Why some cases are slower than others                                                                                       
+                                                                                                                              
+  The tensor X is stored column-major: X[i + j*I + k*I*J]. The innermost summation loop accesses X with different strides
+  depending on which mode is being contracted:                                                                                
+  
+  ┌────────────┬──────────────────┬──────────────┬─────────────────────────────┐                                              
+  │    Case    │ Inner loop index │   X stride   │             Why             │                                            
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤                                              
+  │ m1n3, m1n2 │ i                │ 1 (stride-1) │ Sequential — cache loves it │                                            
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤
+  │ m2n3, m3n2 │ j or k           │ I = 1000     │ 4KB jumps                   │                                              
+  ├────────────┼──────────────────┼──────────────┼─────────────────────────────┤                                              
+  │ m3n1       │ k                │ I×J = 10⁶    │ 4MB jumps — cache disaster  │                                              
+  └────────────┴──────────────────┴──────────────┴─────────────────────────────┘                                              
+                                                                                                                            
+  That's why m3n1 takes ~10s and m1n3 takes ~3.3s, even though both do exactly I×J×K = 1B multiply-adds.                      
+                                                                                                                            
+  ---                                                                                                                         
+  OpenMP scaling                                                                                                            
+                
+  The cache-friendly cases (m1n3–m3n2) scale almost perfectly — at 32 threads you get ~25x speedup. The m2n1/m3n1 cases only
+  get ~3x at 32 threads because they're bandwidth-bottlenecked: more threads just fight harder over the same memory bus.      
+  
+  ---                                                                                                                         
+  Why the GPU obliterates OpenMP                                                                                            
+                                
+  The GPU timing (0.019s) only covers the kernel + D2H copy — the H2D transfer of the 4GB tensor is not timed (look at where
+  cudaEventRecord(start) is called, line 121, after the memcpys). So you're comparing GPU kernel execution to full CPU wall   
+  time, which gives you an even more dramatic number. Even accounting for that, the GPU wins because:
+                                                                                                                              
+  1. It dispatches ~1M threads (one per (i,k) output element) all at once vs 32 CPU threads                                   
+  2. GPU HBM bandwidth is ~10–20x higher than CPU DRAM bandwidth
+                                                                                                                              
+  ---                                                                                                                       
+  Why 2k is painfully slow
+                                                                                                                              
+  The work scales as N³. Going from 1k to 2k:
+                                                                                                                              
+  - Data: 1k tensor = 4 GB → 2k tensor = 32 GB (8×)                                                                           
+  - Work: 1B ops → 8B ops (8×)
+                                                                                                                              
+  So each case takes ~8× longer. Your 1k serial run took ~30s total for all 6 cases. At 2k that's ~4 minutes just for serial, 
+  then 6 OpenMP thread counts × ~2–6 min each = easily 30–45 minutes for the whole benchmark.                                 
+                                                                                                                              
+  For the GPU at 2k: the tensor is 32 GB. cudaMalloc for that will almost certainly fail (most cluster GPUs have 16–40 GB),   
+  and CHECK_CUDA will call exit(1). The GPU job isn't slow — it's probably crashing silently and the slow part you're
+  observing is the serial/OpenMP portion of the benchmark running before the GPU step.                                        
+                                                                                                                            
+  Check your SLURM error log (bench-<jobid>.err) — you'll likely see a "CUDA Error: out of memory" line from the GPU step.    
+  
+✻ Crunched for 2m 2s                                                                                                          
+                                                                                                                            
+※ recap: We were analyzing benchmark results for a batched tensor-times-vector project. The next step is checking the SLURM   
+  error log for a CUDA out-of-memory error at the 2k problem size. (disable recaps in /config)                                
+                                                                                                                              
+❯ Ah ok, so it seems like we need to support data problems larger than VRAM for the GPU case, and we need to make the timing  
+  comparison more fair                                                                                                     
+                                                                                                                              
+⏺ Two clean fixes needed: chunk the tensor over the k-dimension so any size fits in VRAM, and wrap everything (H2D + kernel + 
+  D2H) in clock_gettime to match what the serial/OMP versions time.                                                         
+
+  Let me look at the generate code to confirm the data layout before writing anything. 
+  ⏺ Good. K-slices are contiguous (each is I*J floats in sequence), so chunking over k is a single cudaMemcpy per chunk with no
+  scatter/gather. Here's the plan:                   
+
+  1. Query free VRAM with cudaMemGetInfo, compute how many k-slices fit                                                       
+  2. Loop over k-chunks: H2D slice → kernel → continue (no D2H mid-loop)
+  3. One D2H at the end for Y                                                                                                 
+  4. clock_gettime wraps the entire thing (H2D + kernels + D2H) to match serial/OMP timing                                    
+  5. Remove the dead setup_kernel/generateRandomNumbers/dimGrid3 code that prevents compilation 
+
+❯ @README.md can you look at everything in this repo (the code files that are used, the git history, the slides, the results and figures, etc) and   
+  help me draft a technical report as per the project description? It will also be useful to look at @prompts.txt for snippets of the conversation   
+  history, as well as the presentation for the structure of the narrative that I told (I have already given it).                                     
+  ⎿  Read README.md (82 lines)
+  ⎿  Read prompts.txt (558 lines)
+
+⏺ I'll explore the repo comprehensively to understand everything before drafting the report. Let me launch parallel agents.
+
+  ❯ That seems like a reasonable outline. Next, lets discuss details. Can you ask me questions related to your planned implementation?                 
+                                                                                                                                     
+⏺ User answered Claude's questions:                                                                                                                  
+  ⎿  · How many figures should the report include? → Three main                                                                                    
+     · How should the OpenMP results be framed in the report? → A mix of honest limitation and comparative context. I do not understand openmp       
+     myself, so this code is complely unverified. That is why I am calling it unrefined.                                                             
+     · For the LLM appendix, how should the prompts be listed? → Curated summary                                          
+     · What page-count target should we aim for? → Don't target a page count. Explain everything but don't add any fluff. If it is too long, I will  
+     selectively cut later. 
+
+❯ I think this is a solid start. I made some edits for clarity and accuracy. One thing I do think that we should emphasize more is that the time is  
+  entire dominated by memory bandwidth rather than computation. My current understanding is that the speedup factor between CPU and GPU really just  
+  shows the difference in their memory bandwidths. The slope of the GPU runtime chart seems to match somewhat closely to the expected memory         
+  bandwith, so that might be an additional area for discussion / prep work in the narrative.                                                         
+                                                                                                                                                     
+⏺ Good insight. Let me read the current state of your edited report first, then compute the bandwidth numbers from the data to make sure the analysis
+   is accurate.  
+
+   python3 -c "
+   import csv
+
+   rows = []
+   with open('/Users/dubose/Desktop/647/project-5-DuBose-Tuller/results.csv') as f:
+       for line in f:
+           parts = line.strip().split(',')
+           if len(parts) == 6:
+               method, case, I, J, K, t = parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), float(parts[5])
+               rows.append((method, case, I, J, K, t))
+
+   print('=== GPU effective throughput (case m3n1) ===')
+      print('=== GPU effective throughput (case m3n1) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'GPU' and case == 'm3n1' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Serial effective throughput (case m3n1) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'Serial' and case == 'm3n1' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Serial effective throughput (case m1n3) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'Serial' and case == 'm1n3' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Expected speedup from bandwidth ratio ===')
+      gpu_bw = 12.5
+      for serial_eff_bw, case_name in [(1.2, 'm1n3'), (0.41, 'm3n1')]:
+          print(f'  {case_name}: GPU/serial = {gpu_bw}/{serial_eff_bw} = {gpu_bw/serial_eff_bw:.1f}x (observed: see fig1.dat)')
+      "
+      )
+  ⎿  === GPU effective throughput (case m3n1) ===
+       n=500: X=0.50 GB, t=0.040s, throughput=12.45 GB/s
+       n=750: X=1.69 GB, t=0.136s, throughput=12.39 GB/s
+       n=1000: X=4.00 GB, t=0.321s, throughput=12.48 GB/s
+       n=1250: X=7.81 GB, t=0.627s, throughput=12.46 GB/s                                                                                            
+       n=1500: X=13.50 GB, t=1.083s, throughput=12.47 GB/s
+       n=1750: X=21.44 GB, t=1.724s, throughput=12.44 GB/s                                                                                           
+       n=2000: X=32.00 GB, t=2.894s, throughput=11.06 GB/s                                                                                         
+                                                                                                                                                   
+     === Serial effective throughput (case m3n1) ===                                                                                               
+       n=500: X=0.50 GB, t=0.506s, throughput=0.99 GB/s
+       n=750: X=1.69 GB, t=3.438s, throughput=0.49 GB/s
+       n=1000: X=4.00 GB, t=9.716s, throughput=0.41 GB/s
+       n=2000: X=32.00 GB, t=139.561s, throughput=0.23 GB/s
+
+     === Serial effective throughput (case m1n3) ===
+       n=500: X=0.50 GB, t=0.416s, throughput=1.20 GB/s
+       n=750: X=1.69 GB, t=1.405s, throughput=1.20 GB/s
+       n=1000: X=4.00 GB, t=3.330s, throughput=1.20 GB/s
+       n=2000: X=32.00 GB, t=27.568s, throughput=1.16 GB/s
+
+     === Expected speedup from bandwidth ratio ===
+       m1n3: GPU/serial = 12.5/1.2 = 10.4x (observed: see fig1.dat)
+       m3n1: GPU/serial = 12.5/0.41 = 30.5x (observed: see fig1.dat)
+
+❯ and can you explain to me why the script you generated tells us what the bandwidth of these devices are?                                           
+                    
+⏺ The script computes data_size / time for each run, and this works as a bandwidth measurement because BTTV is so deeply bandwidth-bound.
+                                                                                                                                                     
+  The arithmetic intensity argument is why. Each output element requires reading the contracted dimension (length $L$) from $X$ and $L$ values from  
+  $U$, doing $2L$ FLOPs, and writing one float:                                            
+                                                                                                                                                     
+  $$\text{AI} = \frac{2L \text{ FLOPs}}{8L \text{ bytes}} \approx 0.25 \text{ FLOP/byte}$$                                                           
+                                                                                                                                                   
+  For any hardware with a ridge point above ~1 FLOP/byte (true of every CPU and GPU), 0.25 is firmly in the bandwidth-bound regime — compute is never
+   the bottleneck. So to a very good approximation:                                                                                                
+                                                                                                                                                     
+  $$\text{time} \approx \frac{\text{data size}}{\text{bandwidth}}$$                                                                                  
+                                                                                                                                                   
+  Rearranging: $\text{bandwidth} \approx \frac{\text{data size}}{\text{time}}$. The dominant data is reading $X$ (size $n^3 \times 4$ bytes), so     
+  that's what the script divides.                                                                                                                  
+                                                                                                                                                     
+  What makes the GPU result so clean is that the throughput is constant across all problem sizes (12.45–12.48 GB/s before chunking), which tells you 
+  the bottleneck is a single fixed-bandwidth link: the PCIe bus. If the GPU kernel were the bottleneck, the number would vary with $n$ as the kernel
+  efficiency changed. The constant answer is essentially a speed-of-light measurement of your PCIe slot.                                             
+                                                                                                                                                   
+  The serial result is the opposite story — the effective bandwidth drops with $n$ for the strided case (0.99 → 0.41 → 0.23 GB/s), because as $n$    
+  grows the access stride $IJ = n^2$ grows with it, so the fraction of accesses that miss cache increases. The bandwidth you're measuring isn't DDR4
+  bandwidth; it's "how quickly the CPU can actually consume bytes from $X$ given the -O0 overhead and whatever the cache miss rate is at that problem
+   size."                                                                                                                                          
+                                                                                                                                                   
+✻ Worked for 3m 39s                   
+
+❯ Ok that makes sense, can you elaborate more on that in the report as is appropriate and add this part of the conversation to the prompt summary    
+  section? 
+
+⏺ I'll add an arithmetic intensity subsection after the memory access section, expand the size scaling analysis with the bandwidth numbers, and add a
+   prompt entry to the appendix.   
+
+⏺ Now recompile to verify no errors crept in:
+      
+⏺ Bash(pdflatex -interaction=nonstopmode report.tex 2>&1 | grep -E "^!" | head -10 && pdflatex -interaction=nonstopmode report.tex 2>&1 | tail -3)   
+  ⎿  ublic/amsfonts/symbols/msbm10.pfb>                                                                                                              
+     Output written on report.pdf (9 pages, 222303 bytes).                                                                                           
+     Transcript written on report.log.                                                                                                               
+                                                                                                                                                     
+⏺ Clean compile, 9 pages. Here's a summary of what changed:                                                                                          
+                                                                                                                                                     
+  Section 3.3 (new) — Arithmetic intensity and the bandwidth-bound regime: derives AI ≈ 0.25 FLOP/byte, explains the ridge-point concept, and        
+  establishes that for a bandwidth-bound operation time ≈ data/bandwidth, so measuring time gives effective bandwidth.                             
+                                                                                                                                                     
+  Section 6.3 (expanded) — Added a table of GPU throughput at each problem size (all land at ~12.45–12.48 GB/s before chunking kicks in), then       
+  explains: that constant number is PCIe 3.0 ×16, not HBM; the declining serial numbers for (3,1) (0.99 → 0.41 → 0.23 GB/s) reflect the growing cache
+   miss rate as stride $n^2$ outgrows cache; the flat serial number for (1,3) (~1.2 GB/s) confirms -O0 overhead is the bottleneck there; and the     
+  speedup ratios (30.5× predicted, 30.3× observed) confirm the GPU's advantage is entirely a bandwidth ratio, not computational power.               
+                                                                                                                                                     
+  Appendix — Added prompt item 7 documenting this bandwidth conversation. 

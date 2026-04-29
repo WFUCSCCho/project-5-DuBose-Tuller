@@ -1,0 +1,25 @@
+% ── Figure 2: OMP thread scaling at n=1000 (log-log) ────────
+% Requires: \usepackage{pgfplots}  \pgfplotsset{compat=1.18}
+\begin{tikzpicture}
+\begin{axis}[
+    xmode=log, ymode=log,
+    log basis x=2, log basis y=2,
+    xtick={1,2,4,8,16,32},
+    xticklabels={1,2,4,8,16,32},
+    xlabel={OMP threads},
+    ylabel={Speedup over serial},
+    legend pos=north west,
+    width=0.9\linewidth,
+    height=6.5cm,
+    xmin=0.8, xmax=48,
+    ymin=0.5, ymax=48,
+    ymajorgrids=true, xmajorgrids=true,
+]
+\addplot[dashed,gray,thick,domain=1:32,samples=2] {x};
+\addlegendentry{Ideal}
+\addplot[mark=o,blue,thick] table[x=threads,y=m1n3] {fig/fig2.dat};
+\addlegendentry{$m{=}1,\,n{=}3$}
+\addplot[mark=square*,red,thick] table[x=threads,y=m3n1] {fig/fig2.dat};
+\addlegendentry{$m{=}3,\,n{=}1$}
+\end{axis}
+\end{tikzpicture}

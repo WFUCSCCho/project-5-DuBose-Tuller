@@ -1,0 +1,6 @@
+1. Convert MEX code to C
+2. Port matmul code for CUDA starter code
+3. Replace matmul with a dot product kernel operating on linear indices
+4. Think about problem sizes bigger that VRAM
+5. Switch from generating the data on the GPU itself to generating a bin file beforehand and loading it in. This is more reflective of the true process
+6. Have the GPU code load in slices at a time so that problems larger than VRAM can be tested.
