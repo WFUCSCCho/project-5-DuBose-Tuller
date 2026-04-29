@@ -556,3 +556,149 @@ It compiles now, but only the first column of the result (10x10x10) is nonzero. 
   3. One D2H at the end for Y                                                                                                 
   4. clock_gettime wraps the entire thing (H2D + kernels + D2H) to match serial/OMP timing                                    
   5. Remove the dead setup_kernel/generateRandomNumbers/dimGrid3 code that prevents compilation 
+
+❯ @README.md can you look at everything in this repo (the code files that are used, the git history, the slides, the results and figures, etc) and   
+  help me draft a technical report as per the project description? It will also be useful to look at @prompts.txt for snippets of the conversation   
+  history, as well as the presentation for the structure of the narrative that I told (I have already given it).                                     
+  ⎿  Read README.md (82 lines)
+  ⎿  Read prompts.txt (558 lines)
+
+⏺ I'll explore the repo comprehensively to understand everything before drafting the report. Let me launch parallel agents.
+
+  ❯ That seems like a reasonable outline. Next, lets discuss details. Can you ask me questions related to your planned implementation?                 
+                                                                                                                                     
+⏺ User answered Claude's questions:                                                                                                                  
+  ⎿  · How many figures should the report include? → Three main                                                                                    
+     · How should the OpenMP results be framed in the report? → A mix of honest limitation and comparative context. I do not understand openmp       
+     myself, so this code is complely unverified. That is why I am calling it unrefined.                                                             
+     · For the LLM appendix, how should the prompts be listed? → Curated summary                                          
+     · What page-count target should we aim for? → Don't target a page count. Explain everything but don't add any fluff. If it is too long, I will  
+     selectively cut later. 
+
+❯ I think this is a solid start. I made some edits for clarity and accuracy. One thing I do think that we should emphasize more is that the time is  
+  entire dominated by memory bandwidth rather than computation. My current understanding is that the speedup factor between CPU and GPU really just  
+  shows the difference in their memory bandwidths. The slope of the GPU runtime chart seems to match somewhat closely to the expected memory         
+  bandwith, so that might be an additional area for discussion / prep work in the narrative.                                                         
+                                                                                                                                                     
+⏺ Good insight. Let me read the current state of your edited report first, then compute the bandwidth numbers from the data to make sure the analysis
+   is accurate.  
+
+   python3 -c "
+   import csv
+
+   rows = []
+   with open('/Users/dubose/Desktop/647/project-5-DuBose-Tuller/results.csv') as f:
+       for line in f:
+           parts = line.strip().split(',')
+           if len(parts) == 6:
+               method, case, I, J, K, t = parts[0], parts[1], int(parts[2]), int(parts[3]), int(parts[4]), float(parts[5])
+               rows.append((method, case, I, J, K, t))
+
+   print('=== GPU effective throughput (case m3n1) ===')
+      print('=== GPU effective throughput (case m3n1) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'GPU' and case == 'm3n1' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Serial effective throughput (case m3n1) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'Serial' and case == 'm3n1' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Serial effective throughput (case m1n3) ===')
+      for method, case, I, J, K, t in rows:
+          if method == 'Serial' and case == 'm1n3' and I == J == K:
+              data_gb = I**3 * 4 / 1e9
+              bw = data_gb / t
+              print(f'  n={I}: X={data_gb:.2f} GB, t={t:.3f}s, throughput={bw:.2f} GB/s')
+
+      print()
+      print('=== Expected speedup from bandwidth ratio ===')
+      gpu_bw = 12.5
+      for serial_eff_bw, case_name in [(1.2, 'm1n3'), (0.41, 'm3n1')]:
+          print(f'  {case_name}: GPU/serial = {gpu_bw}/{serial_eff_bw} = {gpu_bw/serial_eff_bw:.1f}x (observed: see fig1.dat)')
+      "
+      )
+  ⎿  === GPU effective throughput (case m3n1) ===
+       n=500: X=0.50 GB, t=0.040s, throughput=12.45 GB/s
+       n=750: X=1.69 GB, t=0.136s, throughput=12.39 GB/s
+       n=1000: X=4.00 GB, t=0.321s, throughput=12.48 GB/s
+       n=1250: X=7.81 GB, t=0.627s, throughput=12.46 GB/s                                                                                            
+       n=1500: X=13.50 GB, t=1.083s, throughput=12.47 GB/s
+       n=1750: X=21.44 GB, t=1.724s, throughput=12.44 GB/s                                                                                           
+       n=2000: X=32.00 GB, t=2.894s, throughput=11.06 GB/s                                                                                         
+                                                                                                                                                   
+     === Serial effective throughput (case m3n1) ===                                                                                               
+       n=500: X=0.50 GB, t=0.506s, throughput=0.99 GB/s
+       n=750: X=1.69 GB, t=3.438s, throughput=0.49 GB/s
+       n=1000: X=4.00 GB, t=9.716s, throughput=0.41 GB/s
+       n=2000: X=32.00 GB, t=139.561s, throughput=0.23 GB/s
+
+     === Serial effective throughput (case m1n3) ===
+       n=500: X=0.50 GB, t=0.416s, throughput=1.20 GB/s
+       n=750: X=1.69 GB, t=1.405s, throughput=1.20 GB/s
+       n=1000: X=4.00 GB, t=3.330s, throughput=1.20 GB/s
+       n=2000: X=32.00 GB, t=27.568s, throughput=1.16 GB/s
+
+     === Expected speedup from bandwidth ratio ===
+       m1n3: GPU/serial = 12.5/1.2 = 10.4x (observed: see fig1.dat)
+       m3n1: GPU/serial = 12.5/0.41 = 30.5x (observed: see fig1.dat)
+
+❯ and can you explain to me why the script you generated tells us what the bandwidth of these devices are?                                           
+                    
+⏺ The script computes data_size / time for each run, and this works as a bandwidth measurement because BTTV is so deeply bandwidth-bound.
+                                                                                                                                                     
+  The arithmetic intensity argument is why. Each output element requires reading the contracted dimension (length $L$) from $X$ and $L$ values from  
+  $U$, doing $2L$ FLOPs, and writing one float:                                            
+                                                                                                                                                     
+  $$\text{AI} = \frac{2L \text{ FLOPs}}{8L \text{ bytes}} \approx 0.25 \text{ FLOP/byte}$$                                                           
+                                                                                                                                                   
+  For any hardware with a ridge point above ~1 FLOP/byte (true of every CPU and GPU), 0.25 is firmly in the bandwidth-bound regime — compute is never
+   the bottleneck. So to a very good approximation:                                                                                                
+                                                                                                                                                     
+  $$\text{time} \approx \frac{\text{data size}}{\text{bandwidth}}$$                                                                                  
+                                                                                                                                                   
+  Rearranging: $\text{bandwidth} \approx \frac{\text{data size}}{\text{time}}$. The dominant data is reading $X$ (size $n^3 \times 4$ bytes), so     
+  that's what the script divides.                                                                                                                  
+                                                                                                                                                     
+  What makes the GPU result so clean is that the throughput is constant across all problem sizes (12.45–12.48 GB/s before chunking), which tells you 
+  the bottleneck is a single fixed-bandwidth link: the PCIe bus. If the GPU kernel were the bottleneck, the number would vary with $n$ as the kernel
+  efficiency changed. The constant answer is essentially a speed-of-light measurement of your PCIe slot.                                             
+                                                                                                                                                   
+  The serial result is the opposite story — the effective bandwidth drops with $n$ for the strided case (0.99 → 0.41 → 0.23 GB/s), because as $n$    
+  grows the access stride $IJ = n^2$ grows with it, so the fraction of accesses that miss cache increases. The bandwidth you're measuring isn't DDR4
+  bandwidth; it's "how quickly the CPU can actually consume bytes from $X$ given the -O0 overhead and whatever the cache miss rate is at that problem
+   size."                                                                                                                                          
+                                                                                                                                                   
+✻ Worked for 3m 39s                   
+
+❯ Ok that makes sense, can you elaborate more on that in the report as is appropriate and add this part of the conversation to the prompt summary    
+  section? 
+
+⏺ I'll add an arithmetic intensity subsection after the memory access section, expand the size scaling analysis with the bandwidth numbers, and add a
+   prompt entry to the appendix.   
+
+⏺ Now recompile to verify no errors crept in:
+      
+⏺ Bash(pdflatex -interaction=nonstopmode report.tex 2>&1 | grep -E "^!" | head -10 && pdflatex -interaction=nonstopmode report.tex 2>&1 | tail -3)   
+  ⎿  ublic/amsfonts/symbols/msbm10.pfb>                                                                                                              
+     Output written on report.pdf (9 pages, 222303 bytes).                                                                                           
+     Transcript written on report.log.                                                                                                               
+                                                                                                                                                     
+⏺ Clean compile, 9 pages. Here's a summary of what changed:                                                                                          
+                                                                                                                                                     
+  Section 3.3 (new) — Arithmetic intensity and the bandwidth-bound regime: derives AI ≈ 0.25 FLOP/byte, explains the ridge-point concept, and        
+  establishes that for a bandwidth-bound operation time ≈ data/bandwidth, so measuring time gives effective bandwidth.                             
+                                                                                                                                                     
+  Section 6.3 (expanded) — Added a table of GPU throughput at each problem size (all land at ~12.45–12.48 GB/s before chunking kicks in), then       
+  explains: that constant number is PCIe 3.0 ×16, not HBM; the declining serial numbers for (3,1) (0.99 → 0.41 → 0.23 GB/s) reflect the growing cache
+   miss rate as stride $n^2$ outgrows cache; the flat serial number for (1,3) (~1.2 GB/s) confirms -O0 overhead is the bottleneck there; and the     
+  speedup ratios (30.5× predicted, 30.3× observed) confirm the GPU's advantage is entirely a bandwidth ratio, not computational power.               
+                                                                                                                                                     
+  Appendix — Added prompt item 7 documenting this bandwidth conversation. 
